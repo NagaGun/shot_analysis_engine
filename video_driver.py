@@ -1,0 +1,117 @@
+"""
+video_driver.py
+
+The piece that was still missing: actually running a real video through
+the repo's own detection loop (get_POI -> update_measurements -> predict_KF,
+same pattern as main.py/api.py) to produce the predictions dict, then
+handing that to shot_pipeline.analyze_shot, then optionally generating the
+coaching note.
+
+IMPORTANT: adjust the two imports below to match your actual repo's module
+paths -- these are my best inference from what you showed me (fc-juggle's
+utils/vision_estimate.py and utils/update_predict.py), not confirmed against
+your real file layout. If the import fails, that's the first thing to check.
+"""
+
+import cv2
+import json
+import sys
+import os
+import numpy as np
+
+# fc_juggle is a git submodule pointing at the private juggling repo --
+# add it to sys.path so `utils.vision_estimate` / `utils.update_predict`
+# resolve the same way they do inside that repo's own main.py.
+fc_juggle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fc_juggle")
+sys.path.insert(0, fc_juggle_dir)
+
+# Temporarily change current working directory so vision_estimate.py
+# can locate relative assets like ./models/finetuned.pt at import time
+_old_cwd = os.getcwd()
+try:
+    os.chdir(fc_juggle_dir)
+    from utils.vision_estimate import get_POI
+    from utils.update_predict import update_measurements, predict_KF
+finally:
+    os.chdir(_old_cwd)
+
+from shot_analysis import analyze_shot, generate_coaching_note
+
+
+def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.json", generate_note: bool = True):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {"clip_id": clip_id, "error": f"could not open {video_path}"}
+
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    POI_KEYS = ["Ball", "Head", "Left_Knee", "Right_Knee", "Right_Foot", "Left_Foot"]
+    measurements = {k: np.empty((0, 4)) for k in POI_KEYS}
+    predictions = {k: np.empty((0, 4)) for k in POI_KEYS}
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        POIs = get_POI(frame)
+        measurements = update_measurements(measurements, POIs)
+        predictions = predict_KF(measurements, predictions)
+
+    cap.release()
+
+    # NOTE: predictions arrays are capped at MAX_LEN=100 most-recent processed
+    # frames (utils/update_predict.py). For a short single-shot clip this is
+    # almost always fine, but if any of your 10 clips run long, check
+    # predictions["Ball"].shape[0] against your actual frame count before
+    # trusting frame_of_contact -- if it's exactly 100, you may have lost
+    # early frames.
+
+    required_keys = ["Ball", "Right_Foot", "Left_Foot", "Right_Knee", "Left_Knee"]
+    missing = [k for k in required_keys if k not in predictions or predictions[k].shape[0] == 0]
+    if missing:
+        return {"clip_id": clip_id, "error": f"no detections for: {missing}"}
+
+    result = analyze_shot(
+        video_path, clip_id, predictions,
+        frame_width=frame_width, frame_height=frame_height,
+        calib_path=calib_path,
+    )
+
+    if generate_note and result.get("confidence", 0) > 0:
+        result["coaching_note"] = generate_coaching_note(result)
+
+    return result
+
+
+def run_batch(clips: list, calib_path: str = "calibrations.json", generate_note: bool = True):
+    """
+    clips: list of (video_path, clip_id) tuples -- your 10 test clips.
+    Returns a list of result dicts, and writes them to results.json so
+    you have a record to show your manager alongside the code.
+    """
+    results = []
+    for video_path, clip_id in clips:
+        print(f"Processing {clip_id}...")
+        result = run_on_video(video_path, clip_id, calib_path, generate_note)
+        results.append(result)
+        print(json.dumps(result, indent=2))
+
+    with open("results.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    return results
+
+
+if __name__ == "__main__":
+    # Example: python video_driver.py clips/clip_01.mp4 clip_01
+    # Or run all 10 by editing CLIPS below and calling run_batch instead.
+    if len(sys.argv) >= 3:
+        video_path, clip_id = sys.argv[1], sys.argv[2]
+        result = run_on_video(video_path, clip_id)
+        print(json.dumps(result, indent=2))
+    else:
+        CLIPS = [
+            ("fc_juggle/source_data/Recording 2026-07-25 085437.mp4", "recording_01"),
+        ]
+        run_batch(CLIPS)

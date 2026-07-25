@@ -1,0 +1,12 @@
+[
+  {
+    "clip_id": "recording_01",
+    "frame_of_contact": 2,
+    "foot": "right",
+    "goal_zone": "miss-right",
+    "shot_angle_deg": -18.40454362248002,
+    "ball_speed_kmh": 2.4,
+    "confidence": 1.0,
+    "coaching_note": null
+  }
+]
