@@ -1,0 +1,3 @@
+[submodule "fc_juggle"]
+	path = fc_juggle
+	url = https://github.com/FutbolConnectInc/fc-juggle.git
