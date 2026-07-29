@@ -1,11 +1,101 @@
 [
   {
-    "clip_id": "recording_01",
+    "clip_id": "bottom_l",
+    "frame_of_contact": null,
+    "foot": "unknown",
+    "goal_zone": null,
+    "shot_angle_deg": null,
+    "ball_speed_kmh": null,
+    "confidence": 0.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "bottom_r",
+    "frame_of_contact": 60,
+    "foot": "left",
+    "goal_zone": "mid-right",
+    "shot_angle_deg": -23.34510919238255,
+    "ball_speed_kmh": 103.4,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "bottom_r_2",
+    "frame_of_contact": 37,
+    "foot": "left",
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": 166.11122197071825,
+    "ball_speed_kmh": 7.8,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "center",
+    "frame_of_contact": 43,
+    "foot": "right",
+    "goal_zone": "miss-over",
+    "shot_angle_deg": -28.639766159657484,
+    "ball_speed_kmh": 23.3,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "center_off_post",
+    "frame_of_contact": 136,
+    "foot": "left",
+    "goal_zone": "miss-left",
+    "shot_angle_deg": 163.0075271916378,
+    "ball_speed_kmh": 4.1,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "good",
     "frame_of_contact": 2,
     "foot": "right",
+    "goal_zone": "top-left",
+    "shot_angle_deg": -10.163059407765019,
+    "ball_speed_kmh": 30.6,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "miss",
+    "frame_of_contact": 96,
+    "foot": "left",
+    "goal_zone": "miss-left",
+    "shot_angle_deg": 176.36728469620232,
+    "ball_speed_kmh": 4.5,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "miss_2",
+    "frame_of_contact": 35,
+    "foot": "right",
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": 16.501920391880077,
+    "ball_speed_kmh": 4.7,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "video_1",
+    "frame_of_contact": 3,
+    "foot": "right",
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": 11.140345604684171,
+    "ball_speed_kmh": 34.2,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "video_2",
+    "frame_of_contact": 25,
+    "foot": "right",
     "goal_zone": "miss-right",
-    "shot_angle_deg": -18.40454362248002,
-    "ball_speed_kmh": 2.4,
+    "shot_angle_deg": -120.78239090095096,
+    "ball_speed_kmh": 1.7,
     "confidence": 1.0,
     "coaching_note": null
   }

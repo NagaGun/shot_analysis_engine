@@ -22,18 +22,24 @@ import numpy as np
 # fc_juggle is a git submodule pointing at the private juggling repo --
 # add it to sys.path so `utils.vision_estimate` / `utils.update_predict`
 # resolve the same way they do inside that repo's own main.py.
-fc_juggle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fc_juggle")
-sys.path.insert(0, fc_juggle_dir)
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+FC_JUGGLE_DIR = os.path.join(REPO_ROOT, "fc_juggle")
+sys.path.insert(0, FC_JUGGLE_DIR)
 
-# Temporarily change current working directory so vision_estimate.py
-# can locate relative assets like ./models/finetuned.pt at import time
-_old_cwd = os.getcwd()
+# vision_estimate.py loads its YOLO weights via a path relative to the
+# current working directory ("./models/finetuned.pt"), which only resolves
+# correctly if cwd is fc_juggle/ itself -- true when that repo's own
+# main.py runs it, not true when we import it from here. Temporarily chdir
+# into fc_juggle/ just for this import, then restore cwd immediately after,
+# so the rest of THIS script's relative paths (clips/, calibrations.json)
+# stay relative to this repo's root as expected.
+_original_cwd = os.getcwd()
+os.chdir(FC_JUGGLE_DIR)
 try:
-    os.chdir(fc_juggle_dir)
     from utils.vision_estimate import get_POI
     from utils.update_predict import update_measurements, predict_KF
 finally:
-    os.chdir(_old_cwd)
+    os.chdir(_original_cwd)
 
 from shot_analysis import analyze_shot, generate_coaching_note
 
@@ -46,9 +52,16 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    POI_KEYS = ["Ball", "Head", "Left_Knee", "Right_Knee", "Right_Foot", "Left_Foot"]
+    # update_measurements expects these keys to already exist with empty
+    # arrays -- it appends via np.vstack, it doesn't lazily create keys.
+    # This matches the repo's own documented initial state
+    # (measurements[point] = np.empty(shape=(0, 4))); ideally confirm this
+    # against main.py/api.py's actual init code rather than trusting this
+    # hardcoded list long-term.
+    POI_KEYS = ["Left_Knee", "Right_Knee", "Left_Foot", "Right_Foot", "Head", "Ball"]
     measurements = {k: np.empty((0, 4)) for k in POI_KEYS}
     predictions = {k: np.empty((0, 4)) for k in POI_KEYS}
+    frame_count = 0
 
     while True:
         ret, frame = cap.read()
@@ -57,15 +70,15 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
         POIs = get_POI(frame)
         measurements = update_measurements(measurements, POIs)
         predictions = predict_KF(measurements, predictions)
+        frame_count += 1
 
     cap.release()
 
-    # NOTE: predictions arrays are capped at MAX_LEN=100 most-recent processed
-    # frames (utils/update_predict.py). For a short single-shot clip this is
-    # almost always fine, but if any of your 10 clips run long, check
-    # predictions["Ball"].shape[0] against your actual frame count before
-    # trusting frame_of_contact -- if it's exactly 100, you may have lost
-    # early frames.
+    # predictions arrays are capped at MAX_LEN=100 most-recent processed frames
+    # (utils/update_predict.py). frame_count (total frames actually processed)
+    # is passed to analyze_shot below specifically so it can compute the right
+    # offset when that cap has trimmed early rows -- this used to silently
+    # produce wrong frame numbers on longer clips; now it's handled.
 
     required_keys = ["Ball", "Right_Foot", "Left_Foot", "Right_Knee", "Left_Knee"]
     missing = [k for k in required_keys if k not in predictions or predictions[k].shape[0] == 0]
@@ -75,6 +88,7 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
     result = analyze_shot(
         video_path, clip_id, predictions,
         frame_width=frame_width, frame_height=frame_height,
+        total_processed_frames=frame_count,
         calib_path=calib_path,
     )
 
@@ -112,6 +126,15 @@ if __name__ == "__main__":
         print(json.dumps(result, indent=2))
     else:
         CLIPS = [
-            ("fc_juggle/source_data/Recording 2026-07-25 085437.mp4", "recording_01"),
+            ("fc_juggle/source_data/bottom_l.mp4", "bottom_l"),
+            ("fc_juggle/source_data/bottom_r.mp4", "bottom_r"),
+            ("fc_juggle/source_data/bottom_r_2.mp4", "bottom_r_2"),
+            ("fc_juggle/source_data/center.mp4", "center"),
+            ("fc_juggle/source_data/center_off_post.mp4", "center_off_post"),
+            ("fc_juggle/source_data/good.mp4", "good"),
+            ("fc_juggle/source_data/miss.mp4", "miss"),
+            ("fc_juggle/source_data/miss_2.mp4", "miss_2"),
+            ("fc_juggle/source_data/video 1.mp4", "video_1"),
+            ("fc_juggle/source_data/video_2.mp4", "video_2"),
         ]
         run_batch(CLIPS)

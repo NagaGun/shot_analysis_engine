@@ -122,18 +122,119 @@ def load_calibration(clip_id: str, calib_path: str):
     return np.array(corners, dtype=np.float32) if corners else None
 
 
-def calibrate_clip(video_path: str, clip_id: str, calib_path: str = "calibrations.json", frame_number: int = 0):
+def _line_intersection(line1, line2):
+    """Standard 2-line intersection in pixel space. Returns (x, y) or None
+    if the lines are parallel (degenerate — shouldn't happen for a real
+    post/crossbar pair, but guard against it anyway)."""
+    x1, y1, x2, y2 = line1
+    x3, y3, x4, y4 = line2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    px = ((x1*y2 - y1*x2)*(x3-x4) - (x1-x2)*(x3*y4 - y3*x4)) / denom
+    py = ((x1*y2 - y1*x2)*(y3-y4) - (y1-y2)*(x3*y4 - y3*x4)) / denom
+    return (px, py)
+
+
+def detect_goal_corners_auto(frame: np.ndarray):
     """
-    Full flow for one clip: reuse saved calibration if it exists, otherwise
-    prompt for clicks and save it. Returns (homography, pixel_corners), or
-    (None, None) if calibration isn't usable (e.g. goal not visible ->
-    caller should treat this clip as low-confidence / non-calibrated).
+    Automatically locates the 4 goal corners (TL, TR, BR, BL) in a single
+    frame using classical CV — no click required. Approach: goals are
+    typically much brighter (white/light) than the grass behind them, so
+    isolate bright regions, find straight line segments via Hough transform,
+    split into near-vertical (posts) vs near-horizontal (crossbar/ground),
+    and compute corners from line intersections.
+
+    This is a heuristic, not a trained detector — it will fail on some
+    clips (poor contrast, non-white goal, cluttered background, goal partly
+    out of frame). Returns None on failure so the caller can fall back to
+    manual clicking rather than silently producing garbage corners.
     """
-    corners = load_calibration(clip_id, calib_path)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, bright_mask = cv2.threshold(gray, 190, 255, cv2.THRESH_BINARY)
+    edges = cv2.Canny(bright_mask, 50, 150)
+
+    min_len = frame.shape[0] // 6
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50,
+                             minLineLength=min_len, maxLineGap=20)
+    if lines is None:
+        return None
+
+    vertical, horizontal = [], []
+    for l in lines[:, 0]:
+        x1, y1, x2, y2 = map(float, l)
+        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+        length = np.hypot(x2 - x1, y2 - y1)
+        if abs(abs(angle) - 90) < 20:       # near-vertical -> candidate post
+            vertical.append((x1, y1, x2, y2, length))
+        elif abs(angle) < 20:               # near-horizontal -> candidate crossbar
+            horizontal.append((x1, y1, x2, y2, length))
+
+    if len(vertical) < 2 or len(horizontal) < 1:
+        return None  # not enough structure found — let caller fall back
+
+    # crossbar: longest horizontal line
+    horizontal.sort(key=lambda h: -h[4])
+    bar = horizontal[0]
+
+    # posts: leftmost and rightmost vertical lines by x-position (handles
+    # multiple detected segments per post by just taking the extremes)
+    vertical.sort(key=lambda v: (v[0] + v[2]) / 2)
+    left_post = vertical[0]
+    right_post = vertical[-1]
+    if left_post is right_post:
+        return None
+
+    bar_line = (bar[0], bar[1], bar[2], bar[3])
+    left_line = (left_post[0], left_post[1], left_post[2], left_post[3])
+    right_line = (right_post[0], right_post[1], right_post[2], right_post[3])
+
+    top_left = _line_intersection(left_line, bar_line)
+    top_right = _line_intersection(right_line, bar_line)
+    if top_left is None or top_right is None:
+        return None
+
+    # bottom corners: use the lower endpoint of each post line directly
+    # (ground line detection is unreliable — grass/pitch lines are noisy —
+    # so this is a pragmatic simplification, not a true ground-line intersect)
+    bottom_left = (left_post[0], left_post[1]) if left_post[1] > left_post[3] else (left_post[2], left_post[3])
+    bottom_right = (right_post[0], right_post[1]) if right_post[1] > right_post[3] else (right_post[2], right_post[3])
+
+    corners = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+
+    # sanity check: width should be noticeably larger than a degenerate sliver
+    width_px = abs(top_right[0] - top_left[0])
+    if width_px < frame.shape[1] * 0.1:
+        return None
+
+    return corners
+
+
+def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json"):
+    """
+    Preferred over calibrate_clip: tries automatic detection first, at
+    frame_number (pass the contact frame or a frame close to it — NOT frame
+    0 — so calibration reflects where the camera actually is at the moment
+    that matters, which is what fixes the "video moves the goal" problem).
+
+    Falls back to interactive clicking only if auto-detection fails on this
+    frame, so you're not blocked when a clip's contrast/lighting defeats the
+    heuristic. Caches whichever succeeds, keyed by clip_id AND frame_number,
+    since the whole point now is that calibration is frame-specific, not
+    one-per-clip.
+    """
+    cache_key = f"{clip_id}_f{frame_number}"
+    corners = load_calibration(cache_key, calib_path)
+
     if corners is None:
         frame = get_calibration_frame(video_path, frame_number)
-        corners = click_corners_interactive(frame)
-        save_calibration(clip_id, corners, calib_path)
+        corners = detect_goal_corners_auto(frame)
+        if corners is None:
+            # auto-detection failed on this clip/frame -- fall back rather
+            # than silently returning no calibration at all
+            corners = click_corners_interactive(frame)
+        save_calibration(cache_key, corners, calib_path)
+
     return compute_homography(corners), corners
 
 
@@ -149,6 +250,7 @@ def ball_track_from_predictions(
     frame_height: int,
     fps: float,
     skip_frames: int = 1,
+    total_processed_frames: int = None,
 ):
     """
     Converts the juggling repo's predictions["Ball"] — an (N, 4) array of
@@ -156,24 +258,35 @@ def ball_track_from_predictions(
     into the [{"frame": int, "x": float, "y": float, "confidence": float}]
     format the rest of this module expects.
 
-    Two things this handles that are easy to get wrong:
-    - "frame" here means real video frame number, computed as
-      row_index * skip_frames, since detect_contact_frame's dt calculation
-      needs actual elapsed time, and predictions["Ball"] rows are spaced
-      skip_frames apart, not 1 apart.
+    Bug this fixes: predictions arrays are capped at MAX_LEN=100 most-recent
+    rows (utils/update_predict.py). Once a clip exceeds 100 processed frames,
+    row 0 is NOT frame 0 anymore -- it's whatever frame is (total_processed -
+    len(array)) frames in. Pass total_processed_frames (a running count kept
+    by the caller's frame loop) so this can compute the real offset instead
+    of silently assuming row i = frame i. If you don't pass it, this falls
+    back to the old (buggy-if-truncated) assumption -- fine for clips short
+    enough to never hit MAX_LEN, risky otherwise.
+
+    Other things this handles:
     - normalized coords are denormalized to pixels using this clip's actual
       frame_width/frame_height, since normalized coords alone can't be used
       for pixel-space calibration/homography.
     - NaN rows (ball not detected that frame) are dropped rather than
       passed through — downstream velocity math would blow up on NaN.
     """
+    n = len(ball_array)
+    if total_processed_frames is not None:
+        start_index = max(0, total_processed_frames - n)
+    else:
+        start_index = 0
+
     track = []
     for i, row in enumerate(ball_array):
         cx, cy, w, h = row
         if np.isnan(cx) or np.isnan(cy):
             continue
         track.append({
-            "frame": i * skip_frames,
+            "frame": (start_index + i) * skip_frames,
             "x": float(cx) * frame_width,
             "y": float(cy) * frame_height,
             "width_px": float(w) * frame_width,  # kept for velocity normalization —
@@ -559,27 +672,33 @@ def analyze_shot(
     frame_height: int,
     skip_frames: int = 1,
     calib_path: str = "calibrations.json",
+    total_processed_frames: int = None,
 ):
     """
     predictions: the repo's predictions dict for this clip, with keys
         "Ball", "Left_Knee", "Right_Knee", "Left_Foot", "Right_Foot"
-        (each an (N,4) array as documented in trajectory.py's adapter)
+        (each an (N,4) array as documented in ball_track_from_predictions)
+    total_processed_frames: total frames the caller's loop actually
+        processed for this clip -- needed to correct for MAX_LEN=100
+        truncation. Pass this; if omitted, frame numbers may be wrong for
+        clips longer than ~100 processed frames.
 
-    Returns a dict matching the target schema (minus Week 3 fields).
+    Returns a dict matching the target schema (minus coaching_note, which
+    is filled in separately since it needs an API call).
     """
     fps = get_reliable_fps(video_path)
     fps_reliable = fps is not None
     if not fps_reliable:
         fps = 30.0  # fallback so downstream math doesn't crash; confidence reflects the guess
 
-    ball_track = ball_track_from_predictions(predictions["Ball"], frame_width, frame_height, fps, skip_frames)
+    ball_track = ball_track_from_predictions(predictions["Ball"], frame_width, frame_height, fps, skip_frames, total_processed_frames)
     foot_tracks = {
-        "Right_Foot": ball_track_from_predictions(predictions["Right_Foot"], frame_width, frame_height, fps, skip_frames),
-        "Left_Foot": ball_track_from_predictions(predictions["Left_Foot"], frame_width, frame_height, fps, skip_frames),
+        "Right_Foot": ball_track_from_predictions(predictions["Right_Foot"], frame_width, frame_height, fps, skip_frames, total_processed_frames),
+        "Left_Foot": ball_track_from_predictions(predictions["Left_Foot"], frame_width, frame_height, fps, skip_frames, total_processed_frames),
     }
     knee_tracks = {
-        "Right_Knee": ball_track_from_predictions(predictions["Right_Knee"], frame_width, frame_height, fps, skip_frames),
-        "Left_Knee": ball_track_from_predictions(predictions["Left_Knee"], frame_width, frame_height, fps, skip_frames),
+        "Right_Knee": ball_track_from_predictions(predictions["Right_Knee"], frame_width, frame_height, fps, skip_frames, total_processed_frames),
+        "Left_Knee": ball_track_from_predictions(predictions["Left_Knee"], frame_width, frame_height, fps, skip_frames, total_processed_frames),
     }
 
     contact_frame, foot, contact_vector = detect_contact_frame_fused(ball_track, foot_tracks, fps)
@@ -599,7 +718,10 @@ def analyze_shot(
         }
 
     try:
-        H, goal_corners = calibrate_clip(video_path, clip_id, calib_path)
+        # Calibrate at contact_frame, not frame 0 -- this is what fixes the
+        # "video moves the goal" problem. Auto-detected, no clicking needed;
+        # falls back to a click only if auto-detection fails on this frame.
+        H, goal_corners = calibrate_clip_auto(video_path, clip_id, contact_frame, calib_path)
         calibration_ok = True
     except ValueError:
         H, goal_corners = None, None
@@ -695,3 +817,45 @@ def generate_coaching_note(shot_data: dict):
         # good geometry but a failed note is still useful output
         print(f"coaching_note generation failed: {e}")
         return None
+
+
+# ======================================================================
+# debug helper (added post-merge to diagnose real-clip runs where
+# contact_frame looks wrong)
+# ======================================================================
+
+def debug_contact_detection(predictions, frame_width, frame_height, fps,
+                             velocity_threshold_ball_widths_per_sec=6.0):
+    """
+    Prints normalized ball velocity per frame and the closest foot distance
+    at each frame, so you can see exactly why a given contact_frame was
+    picked instead of the real strike frame. Run this on any clip where
+    the output looks wrong.
+    """
+    ball_track = ball_track_from_predictions(predictions["Ball"], frame_width, frame_height, fps)
+    foot_tracks = {
+        "Right_Foot": ball_track_from_predictions(predictions["Right_Foot"], frame_width, frame_height, fps),
+        "Left_Foot": ball_track_from_predictions(predictions["Left_Foot"], frame_width, frame_height, fps),
+    }
+
+    print(f"{'frame':>6} {'norm_vel':>10} {'ball_width':>10} {'closest_foot_dist':>18}")
+    for i in range(1, len(ball_track)):
+        prev, curr = ball_track[i - 1], ball_track[i]
+        dt = (curr["frame"] - prev["frame"]) / fps
+        if dt <= 0:
+            continue
+        px_per_sec = ((curr["x"] - prev["x"]) ** 2 + (curr["y"] - prev["y"]) ** 2) ** 0.5 / dt
+        ball_width = curr.get("width_px") or prev.get("width_px")
+        norm_vel = px_per_sec / ball_width if ball_width else float("nan")
+
+        best_dist = None
+        for label, track in foot_tracks.items():
+            foot_pos = next((f for f in track if f["frame"] == curr["frame"]), None)
+            if foot_pos:
+                d = ((foot_pos["x"] - curr["x"]) ** 2 + (foot_pos["y"] - curr["y"]) ** 2) ** 0.5
+                if best_dist is None or d < best_dist:
+                    best_dist = d
+
+        flag = " <-- above threshold" if norm_vel >= velocity_threshold_ball_widths_per_sec else ""
+        dist_str = f"{best_dist:.1f}" if best_dist is not None else "no foot detected"
+        print(f"{curr['frame']:>6} {norm_vel:>10.2f} {ball_width:>10.1f} {dist_str:>18}{flag}")
