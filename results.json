@@ -1,6 +1,36 @@
 [
   {
-    "clip_id": "bottom_l",
+    "clip_id": "bottom_r_2",
+    "frame_of_contact": 33,
+    "foot": "left",
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": -173.98178209412004,
+    "ball_speed_kmh": 12.5,
+    "confidence": 1.0,
+    "coaching_note": "This left-footed attempt demonstrates good precision, finding the bottom-left corner with controlled placement. The player prioritizes accuracy over power from a relatively central angle, delivering an effective shot despite the lower ball speed."
+  },
+  {
+    "clip_id": "center",
+    "frame_of_contact": 31,
+    "foot": "left",
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": -177.3690846887152,
+    "ball_speed_kmh": 3.0,
+    "confidence": 1.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "center_off_post",
+    "frame_of_contact": 133,
+    "foot": "left",
+    "goal_zone": "miss-right",
+    "shot_angle_deg": 149.6965233553202,
+    "ball_speed_kmh": 8.8,
+    "confidence": 1.0,
+    "coaching_note": "This left-footed attempt, taken from a very wide angle, registered a low ball speed of 8.8 km/h and ultimately missed wide to the right. While the player attempted an angled finish, the shot lacked both the necessary power and precision to trouble the goalkeeper."
+  },
+  {
+    "clip_id": "left_corner",
     "frame_of_contact": null,
     "foot": "unknown",
     "goal_zone": null,
@@ -10,93 +40,93 @@
     "coaching_note": null
   },
   {
-    "clip_id": "bottom_r",
-    "frame_of_contact": 60,
-    "foot": "left",
-    "goal_zone": "mid-right",
-    "shot_angle_deg": -23.34510919238255,
-    "ball_speed_kmh": 103.4,
+    "clip_id": "left_corner_2",
+    "frame_of_contact": 371,
+    "foot": "right",
+    "goal_zone": "bottom-right",
+    "shot_angle_deg": -19.079914252974817,
+    "ball_speed_kmh": 4.7,
     "confidence": 1.0,
-    "coaching_note": null
+    "coaching_note": "The player demonstrates excellent awareness to guide a right-footed shot from an acute angle precisely into the bottom-right corner. This attempt clearly prioritizes accurate placement over power, showcasing a composed finishing technique even at a very low ball speed."
   },
   {
-    "clip_id": "bottom_r_2",
-    "frame_of_contact": 37,
+    "clip_id": "left_corner_3",
+    "frame_of_contact": 3,
     "foot": "left",
     "goal_zone": "bottom-left",
-    "shot_angle_deg": 166.11122197071825,
-    "ball_speed_kmh": 7.8,
+    "shot_angle_deg": 41.384593499732546,
+    "ball_speed_kmh": 28.8,
     "confidence": 1.0,
+    "coaching_note": "The player displays excellent composure and technical skill to precisely place a left-footed shot from a wide angle into the bottom-left corner. This attempt highlights a natural finishing tendency from acute angles, prioritizing accuracy over sheer power. The clean execution with their left foot, especially with such accurate placement, suggests promising capability with their non-dominant side."
+  },
+  {
+    "clip_id": "left_middle",
+    "frame_of_contact": 88,
+    "foot": "unknown",
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": 14.755729643240102,
+    "ball_speed_kmh": 33.4,
+    "confidence": 0.85,
+    "coaching_note": "This attempt from an acute angle found the bottom-left corner with good ball speed, demonstrating effective finishing from a wider position. The player shows an ability to combine power with precise placement, consistently hitting target zones."
+  },
+  {
+    "clip_id": "left_middle_2",
+    "frame_of_contact": null,
+    "foot": "unknown",
+    "goal_zone": null,
+    "shot_angle_deg": null,
+    "ball_speed_kmh": null,
+    "confidence": 0.0,
     "coaching_note": null
   },
   {
-    "clip_id": "center",
-    "frame_of_contact": 43,
+    "clip_id": "middle",
+    "frame_of_contact": null,
+    "foot": "unknown",
+    "goal_zone": null,
+    "shot_angle_deg": null,
+    "ball_speed_kmh": null,
+    "confidence": 0.0,
+    "coaching_note": null
+  },
+  {
+    "clip_id": "middle_2",
+    "frame_of_contact": 1,
     "foot": "right",
-    "goal_zone": "miss-over",
-    "shot_angle_deg": -28.639766159657484,
-    "ball_speed_kmh": 23.3,
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": -166.00041757461324,
+    "ball_speed_kmh": 44.3,
     "confidence": 1.0,
-    "coaching_note": null
+    "coaching_note": "The player exhibits excellent power and accuracy, driving a powerful right-footed shot cleanly into the bottom-center of the net. This attempt, taken from a central attacking angle, suggests a profile comfortable with direct finishing opportunities."
   },
   {
-    "clip_id": "center_off_post",
-    "frame_of_contact": 136,
-    "foot": "left",
-    "goal_zone": "miss-left",
-    "shot_angle_deg": 163.0075271916378,
-    "ball_speed_kmh": 4.1,
-    "confidence": 1.0,
-    "coaching_note": null
-  },
-  {
-    "clip_id": "good",
-    "frame_of_contact": 2,
-    "foot": "right",
-    "goal_zone": "top-left",
-    "shot_angle_deg": -10.163059407765019,
-    "ball_speed_kmh": 30.6,
-    "confidence": 1.0,
+    "clip_id": "middle_3",
+    "frame_of_contact": null,
+    "foot": "unknown",
+    "goal_zone": null,
+    "shot_angle_deg": null,
+    "ball_speed_kmh": null,
+    "confidence": 0.0,
     "coaching_note": null
   },
   {
     "clip_id": "miss",
     "frame_of_contact": 96,
     "foot": "left",
-    "goal_zone": "miss-left",
-    "shot_angle_deg": 176.36728469620232,
+    "goal_zone": "bottom-right",
+    "shot_angle_deg": 162.97771302611972,
     "ball_speed_kmh": 4.5,
     "confidence": 1.0,
-    "coaching_note": null
+    "coaching_note": "The player shows a clear preference for placement over power, accurately guiding a left-footed attempt into the bottom-right corner despite minimal ball speed. This acute shot angle suggests a natural tendency to target the goal from wider positions on the field."
   },
   {
-    "clip_id": "miss_2",
-    "frame_of_contact": 35,
-    "foot": "right",
-    "goal_zone": "bottom-center",
-    "shot_angle_deg": 16.501920391880077,
-    "ball_speed_kmh": 4.7,
-    "confidence": 1.0,
-    "coaching_note": null
-  },
-  {
-    "clip_id": "video_1",
-    "frame_of_contact": 3,
-    "foot": "right",
-    "goal_zone": "bottom-center",
-    "shot_angle_deg": 11.140345604684171,
-    "ball_speed_kmh": 34.2,
-    "confidence": 1.0,
-    "coaching_note": null
-  },
-  {
-    "clip_id": "video_2",
+    "clip_id": "right_top",
     "frame_of_contact": 25,
     "foot": "right",
-    "goal_zone": "miss-right",
-    "shot_angle_deg": -120.78239090095096,
+    "goal_zone": "mid-left",
+    "shot_angle_deg": -108.56168848344804,
     "ball_speed_kmh": 1.7,
     "confidence": 1.0,
-    "coaching_note": null
+    "coaching_note": "Despite the extremely low ball speed, the player demonstrates effective placement by guiding the right-footed shot into the mid-left zone. This attempt highlights a finisher who prioritizes accuracy from acute angles rather than raw power."
   }
 ]

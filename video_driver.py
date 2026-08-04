@@ -125,16 +125,10 @@ if __name__ == "__main__":
         result = run_on_video(video_path, clip_id)
         print(json.dumps(result, indent=2))
     else:
+        source_dir = os.path.join(FC_JUGGLE_DIR, "source_data")
+        video_files = sorted([f for f in os.listdir(source_dir) if f.endswith(".mp4")])
         CLIPS = [
-            ("fc_juggle/source_data/bottom_l.mp4", "bottom_l"),
-            ("fc_juggle/source_data/bottom_r.mp4", "bottom_r"),
-            ("fc_juggle/source_data/bottom_r_2.mp4", "bottom_r_2"),
-            ("fc_juggle/source_data/center.mp4", "center"),
-            ("fc_juggle/source_data/center_off_post.mp4", "center_off_post"),
-            ("fc_juggle/source_data/good.mp4", "good"),
-            ("fc_juggle/source_data/miss.mp4", "miss"),
-            ("fc_juggle/source_data/miss_2.mp4", "miss_2"),
-            ("fc_juggle/source_data/video 1.mp4", "video_1"),
-            ("fc_juggle/source_data/video_2.mp4", "video_2"),
+            (os.path.join("fc_juggle", "source_data", v), os.path.splitext(v)[0].replace(" ", "_"))
+            for v in video_files
         ]
         run_batch(CLIPS)

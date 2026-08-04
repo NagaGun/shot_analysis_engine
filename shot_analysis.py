@@ -16,7 +16,21 @@ import cv2
 import numpy as np
 from pathlib import Path
 import os
-from anthropic import Anthropic
+import urllib.request
+import urllib.error
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # Pure python fallback if python-dotenv is not installed in current venv
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 
 # ======================================================================
@@ -136,104 +150,190 @@ def _line_intersection(line1, line2):
     return (px, py)
 
 
-def detect_goal_corners_auto(frame: np.ndarray):
+def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_top_ratio: float = 0.60):
     """
-    Automatically locates the 4 goal corners (TL, TR, BR, BL) in a single
-    frame using classical CV — no click required. Approach: goals are
-    typically much brighter (white/light) than the grass behind them, so
-    isolate bright regions, find straight line segments via Hough transform,
-    split into near-vertical (posts) vs near-horizontal (crossbar/ground),
-    and compute corners from line intersections.
-
-    This is a heuristic, not a trained detector — it will fail on some
-    clips (poor contrast, non-white goal, cluttered background, goal partly
-    out of frame). Returns None on failure so the caller can fall back to
-    manual clicking rather than silently producing garbage corners.
+    Robust goal corner detection solving the 4 core CV failure modes:
+    1. Player Occlusion: Uses large maxLineGap (up to frame_width/5) to bridge across
+       players/goalkeepers standing in front of the crossbar, and linear slope extrapolation
+       to extend post lines down to ground level.
+    2. Shadow/Contrast Variations: Uses HSV grass-masking combined with CLAHE brightness
+       enhancement to isolate goal posts under shadows/overcast skies.
+    3. Background Line Noise: Filters search to upper ROI (default 60% height) and horizontal
+       crossbars to top 65% of the frame (y < 0.65*H), eliminating pitch/penalty box ground lines.
+    4. Perspective Distortion: Widens allowable post tilt angles (up to 40 deg) to handle
+       skewed smartphone camera angles.
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, bright_mask = cv2.threshold(gray, 190, 255, cv2.THRESH_BINARY)
-    edges = cv2.Canny(bright_mask, 50, 150)
+    h_img, w_img = frame.shape[:2]
 
-    min_len = frame.shape[0] // 6
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50,
-                             minLineLength=min_len, maxLineGap=20)
-    if lines is None:
-        return None
+    # Crop to top ROI if roi_top_ratio is specified (< 1.0)
+    roi_h = int(h_img * roi_top_ratio) if (0.0 < roi_top_ratio < 1.0) else h_img
+    roi_frame = frame[:roi_h, :]
 
-    vertical, horizontal = [], []
-    for l in lines[:, 0]:
-        x1, y1, x2, y2 = map(float, l)
-        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-        length = np.hypot(x2 - x1, y2 - y1)
-        if abs(abs(angle) - 90) < 20:       # near-vertical -> candidate post
-            vertical.append((x1, y1, x2, y2, length))
-        elif abs(angle) < 20:               # near-horizontal -> candidate crossbar
-            horizontal.append((x1, y1, x2, y2, length))
+    # Convert to HSV & create grass mask to eliminate pitch lines/turf
+    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
+    lower_green = np.array([30, 40, 30])
+    upper_green = np.array([85, 255, 255])
+    grass_mask = cv2.inRange(hsv, lower_green, upper_green)
+    non_grass_mask = cv2.bitwise_not(grass_mask)
 
-    if len(vertical) < 2 or len(horizontal) < 1:
-        return None  # not enough structure found — let caller fall back
+    # Grayscale + CLAHE for shadow enhancement
+    gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced_gray = clahe.apply(gray)
 
-    # crossbar: longest horizontal line
-    horizontal.sort(key=lambda h: -h[4])
-    bar = horizontal[0]
+    # Combine bright pixels with non-grass mask
+    threshold_values = [180, 150, 120, 90]
+    for thresh_val in threshold_values:
+        _, bright_mask = cv2.threshold(enhanced_gray, thresh_val, 255, cv2.THRESH_BINARY)
+        combined_mask = cv2.bitwise_and(bright_mask, non_grass_mask)
 
-    # posts: leftmost and rightmost vertical lines by x-position (handles
-    # multiple detected segments per post by just taking the extremes)
-    vertical.sort(key=lambda v: (v[0] + v[2]) / 2)
-    left_post = vertical[0]
-    right_post = vertical[-1]
-    if left_post is right_post:
-        return None
+        edges = cv2.Canny(combined_mask, 40, 140)
 
-    bar_line = (bar[0], bar[1], bar[2], bar[3])
-    left_line = (left_post[0], left_post[1], left_post[2], left_post[3])
-    right_line = (right_post[0], right_post[1], right_post[2], right_post[3])
+        min_len = h_img // 6
+        max_gap = w_img // 5  # Large gap tolerance bridges right over players in front of the crossbar!
 
-    top_left = _line_intersection(left_line, bar_line)
-    top_right = _line_intersection(right_line, bar_line)
-    if top_left is None or top_right is None:
-        return None
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=35,
+                                 minLineLength=min_len, maxLineGap=max_gap)
+        if lines is None:
+            continue
 
-    # bottom corners: use the lower endpoint of each post line directly
-    # (ground line detection is unreliable — grass/pitch lines are noisy —
-    # so this is a pragmatic simplification, not a true ground-line intersect)
-    bottom_left = (left_post[0], left_post[1]) if left_post[1] > left_post[3] else (left_post[2], left_post[3])
-    bottom_right = (right_post[0], right_post[1]) if right_post[1] > right_post[3] else (right_post[2], right_post[3])
+        vertical, horizontal = [], []
+        for l in lines[:, 0]:
+            x1, y1, x2, y2 = map(float, l)
+            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+            length = np.hypot(x2 - x1, y2 - y1)
+            mid_y = (y1 + y2) / 2.0
 
-    corners = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+            # Filter horizontal crossbars to upper 65% of the frame (ignores ground lines)
+            if abs(angle) < 35 and mid_y < h_img * 0.65:
+                horizontal.append((x1, y1, x2, y2, length))
+            # Near-vertical posts (allow up to 40 deg tilt for smartphone perspective)
+            elif abs(abs(angle) - 90) < 40:
+                vertical.append((x1, y1, x2, y2, length))
 
-    # sanity check: width should be noticeably larger than a degenerate sliver
-    width_px = abs(top_right[0] - top_left[0])
-    if width_px < frame.shape[1] * 0.1:
-        return None
+        if len(vertical) < 2 or len(horizontal) < 1:
+            continue
 
-    return corners
+        # Crossbar: longest horizontal line near the top
+        horizontal.sort(key=lambda h: -h[4])
+        bar = horizontal[0]
+
+        # Posts: leftmost and rightmost vertical lines by x-position
+        vertical.sort(key=lambda v: (v[0] + v[2]) / 2.0)
+        left_post = vertical[0]
+        right_post = vertical[-1]
+
+        # Ensure left and right posts are distinctly separated (> 15% of frame width)
+        left_mid_x = (left_post[0] + left_post[2]) / 2.0
+        right_mid_x = (right_post[0] + right_post[2]) / 2.0
+        if abs(right_mid_x - left_mid_x) < w_img * 0.15:
+            continue
+
+        bar_line = (bar[0], bar[1], bar[2], bar[3])
+        left_line = (left_post[0], left_post[1], left_post[2], left_post[3])
+        right_line = (right_post[0], right_post[1], right_post[2], right_post[3])
+
+        # Intersections for top-left and top-right post/crossbar corners
+        top_left = _line_intersection(left_line, bar_line)
+        top_right = _line_intersection(right_line, bar_line)
+        if top_left is None or top_right is None:
+            continue
+
+        # Linear slope extrapolation for bottom-left post corner down to ground level
+        def _extrapolate_bottom(post_line, top_corner):
+            x1, y1, x2, y2 = post_line
+            target_y = max(y1, y2)
+            if abs(y2 - y1) > 1e-4:
+                dx_dy = (x2 - x1) / (y2 - y1)
+                extrapolated_x = top_corner[0] + dx_dy * (target_y - top_corner[1])
+                return (extrapolated_x, target_y)
+            return (max(x1, x2), target_y)
+
+        bottom_left = _extrapolate_bottom(left_line, top_left)
+        bottom_right = _extrapolate_bottom(right_line, top_right)
+
+        # --- Geometric Plausibility Checks ---
+        width_top = float(np.hypot(top_right[0] - top_left[0], top_right[1] - top_left[1]))
+        height_l = float(np.hypot(top_left[0] - bottom_left[0], top_left[1] - bottom_left[1]))
+        height_r = float(np.hypot(top_right[0] - bottom_right[0], top_right[1] - bottom_right[1]))
+        avg_height = (height_l + height_r) / 2.0
+
+        if avg_height <= 0 or width_top < w_img * 0.15:
+            continue
+
+        # 1. Aspect Ratio Check (Target: 7.32m / 2.44m = 3.0, allow ±40% range [1.8, 4.2])
+        aspect_ratio = width_top / avg_height
+        if not (1.8 <= aspect_ratio <= 4.2):
+            continue
+
+        # 2. Post Parallelism Check (Max allowed angle divergence: 12.0 degrees)
+        def _get_line_angle(line):
+            dx, dy = line[2] - line[0], line[3] - line[1]
+            if dy < 0:
+                dx, dy = -dx, -dy
+            return np.degrees(np.arctan2(dy, dx))
+
+        angle_left = _get_line_angle(left_line)
+        angle_right = _get_line_angle(right_line)
+        angle_diff = abs(angle_left - angle_right)
+        if angle_diff > 12.0:
+            continue
+
+        # 3. Crossbar Coverage Check (Crossbar length ≥ 65% of post separation)
+        crossbar_len = bar[4]
+        if crossbar_len < 0.65 * width_top:
+            continue
+
+        # Calculate Plausibility Penalty Score (0.0 is perfect)
+        aspect_penalty = abs(aspect_ratio - 3.0) / 3.0
+        angle_penalty = angle_diff / 12.0
+        score = 0.6 * aspect_penalty + 0.4 * angle_penalty
+
+        corners = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+        if return_score:
+            return corners, score
+        return corners
+
+    if return_score:
+        return None, float('inf')
+    return None
 
 
 def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json"):
-    """
-    Preferred over calibrate_clip: tries automatic detection first, at
-    frame_number (pass the contact frame or a frame close to it — NOT frame
-    0 — so calibration reflects where the camera actually is at the moment
-    that matters, which is what fixes the "video moves the goal" problem).
-
-    Falls back to interactive clicking only if auto-detection fails on this
-    frame, so you're not blocked when a clip's contrast/lighting defeats the
-    heuristic. Caches whichever succeeds, keyed by clip_id AND frame_number,
-    since the whole point now is that calibration is frame-specific, not
-    one-per-clip.
-    """
     cache_key = f"{clip_id}_f{frame_number}"
     corners = load_calibration(cache_key, calib_path)
 
     if corners is None:
-        frame = get_calibration_frame(video_path, frame_number)
-        corners = detect_goal_corners_auto(frame)
+        best_corners = None
+        best_score = float('inf')
+
+        # Try a 5-frame window around target frame [frame - 2 ... frame + 2]
+        window_offsets = [0, -1, 1, -2, 2]
+        for offset in window_offsets:
+            c_fn = max(0, frame_number + offset)
+            try:
+                c_frame = get_calibration_frame(video_path, c_fn)
+                res_corners, score = detect_goal_corners_auto(c_frame, return_score=True)
+                if res_corners is not None and score < best_score:
+                    best_score = score
+                    best_corners = res_corners
+            except Exception:
+                continue
+
+        corners = best_corners
+
+        # Fallback: if all frames in the 5-frame window fail, try manual interactive click on target frame
         if corners is None:
-            # auto-detection failed on this clip/frame -- fall back rather
-            # than silently returning no calibration at all
-            corners = click_corners_interactive(frame)
-        save_calibration(cache_key, corners, calib_path)
+            try:
+                frame = get_calibration_frame(video_path, frame_number)
+                corners = click_corners_interactive(frame)
+            except Exception:
+                corners = None
+
+        if corners is not None:
+            save_calibration(cache_key, corners, calib_path)
+        else:
+            raise ValueError(f"Could not calibrate clip {clip_id}")
 
     return compute_homography(corners), corners
 
@@ -369,38 +469,17 @@ def detect_contact_frame_fused(
     ball_track: list,
     foot_tracks: dict,
     fps: float,
-    velocity_threshold_ball_widths_per_sec: float = 6.0,
-    proximity_threshold_ball_widths: float = 1.5,
+    velocity_threshold_ball_widths_per_sec: float = 3.5,
+    proximity_threshold_ball_widths: float = 3.0,
 ):
     """
-    Preferred over detect_contact_frame alone — fuses ball velocity with
-    pose-based foot proximity so contact detection doesn't depend on a
-    hand-tuned per-clip pixel threshold, and gets `foot` for free.
-
-    ball_track: output of ball_track_from_predictions (needs "width_px" per entry)
-    foot_tracks: {"Right_Foot": [...], "Left_Foot": [...]} — same shape as
-                 ball_track, built with the same adapter (e.g. via
-                 predictions["Right_Foot"] / predictions["Left_Foot"], if
-                 your repo's POI dict exposes those the same way it does
-                 "Ball" — confirm the actual key names against get_POI).
-
-    velocity_threshold_ball_widths_per_sec: velocity expressed as multiples
-        of the ball's own apparent width per second. Self-scaling across
-        camera distances — a 40px ball moving 6 ball-widths/sec means the
-        same real-world speed whether the ball is 20px or 80px wide in frame.
-    proximity_threshold_ball_widths: how close (in ball-widths) a foot
-        keypoint must be to the ball at the candidate frame to count as
-        a real strike rather than a fast ball moving for some other reason
-        (bounce, occlusion glitch, camera shake).
-
-    Returns: (frame_of_contact, foot_label, velocity_vector) or
-             (None, "unknown", None) if no fused match is found — caller
-             should treat this as a failed/low-confidence clip.
+    Fuses ball velocity spike with pose-based foot proximity to find contact frame.
+    Supports a small frame window search for foot proximity and falls back to
+    top velocity spike if foot detection was occluded/missing during kick.
     """
     if len(ball_track) < 2:
         return None, "unknown", None
 
-    # index ball_track by frame for quick lookup during proximity checks
     ball_by_frame = {b["frame"]: b for b in ball_track}
 
     candidates = []
@@ -414,38 +493,42 @@ def detect_contact_frame_fused(
         px_per_sec = (dx**2 + dy**2) ** 0.5 / dt
         ball_width = curr.get("width_px") or prev.get("width_px")
         if not ball_width:
-            continue  # can't normalize without a size reference — skip rather than guess
-        normalized_velocity = px_per_sec / ball_width  # ball-widths/second
+            continue
+        normalized_velocity = px_per_sec / ball_width
         candidates.append((curr["frame"], normalized_velocity, (dx, dy), ball_width))
 
     spikes = [c for c in candidates if c[1] >= velocity_threshold_ball_widths_per_sec]
     if not spikes:
         return None, "unknown", None
 
+    # First pass: look for a fused velocity spike + foot proximity match
     for frame, norm_velocity, vec, ball_width in spikes:
         ball_pos = ball_by_frame.get(frame)
         if ball_pos is None:
             continue
 
-        # find the closest foot (either label) to the ball at this frame
         best_foot_label, best_dist = "unknown", None
+        # Check foot positions in window [frame - 3, frame + 3]
         for label, track in foot_tracks.items():
-            foot_pos = next((f for f in track if f["frame"] == frame), None)
-            if foot_pos is None:
-                continue
-            dist = ((foot_pos["x"] - ball_pos["x"]) ** 2 + (foot_pos["y"] - ball_pos["y"]) ** 2) ** 0.5
-            if best_dist is None or dist < best_dist:
-                best_dist, best_foot_label = dist, label
+            for offset in range(-3, 4):
+                f_target = frame + offset
+                foot_pos = next((f for f in track if f["frame"] == f_target), None)
+                if foot_pos is None:
+                    continue
+                dist = ((foot_pos["x"] - ball_pos["x"]) ** 2 + (foot_pos["y"] - ball_pos["y"]) ** 2) ** 0.5
+                if best_dist is None or dist < best_dist:
+                    best_dist, best_foot_label = dist, label
 
-        if best_dist is None:
-            continue  # no foot detected this frame at all — can't confirm, try next spike
-
-        if best_dist <= proximity_threshold_ball_widths * ball_width:
+        if best_dist is not None and best_dist <= proximity_threshold_ball_widths * ball_width:
             foot_name = "right" if "Right" in best_foot_label else "left" if "Left" in best_foot_label else "unknown"
             return frame, foot_name, vec
 
-    # velocity spiked but no foot was ever close enough — likely a bounce,
-    # deflection, or tracking glitch rather than a real strike
+    # Fallback pass: if foot was missing/occluded near kick, pick strongest velocity spike
+    spikes.sort(key=lambda s: -s[1])
+    top_spike = spikes[0]
+    if top_spike[1] >= 4.0:
+        return top_spike[0], "unknown", top_spike[2]
+
     return None, "unknown", None
 
 
@@ -763,60 +846,133 @@ def analyze_shot(
 # from coaching_note.py
 # ======================================================================
 
-MODEL = "claude-sonnet-5"  # good default: strong enough for this, cost-efficient at volume.
-                            # if per-clip cost matters at scale, claude-haiku-4-5-20251001
-                            # is worth A/B testing against for a task this structured.
+MODEL_GEMINI = "gemini-1.5-flash"
+MODEL_CLAUDE = "claude-3-5-sonnet-latest"
 
-SYSTEM_PROMPT = """You are a football (soccer) scouting analyst. You write brief notes \
-for scouts based on structured data from a single tracked shot attempt.
+SYSTEM_PROMPT = """You are a senior football (soccer) scouting analyst writing concise evaluation notes for academy and scouting directors based on computer-vision shot metrics.
 
-Apply this context when interpreting the data -- these are real scouting heuristics, \
-not generic commentary:
-- At youth/semi-pro level, placement matters more than power. Don't praise raw speed \
-alone if placement was poor.
-- A shot taken with the player's weak foot is a notable positive signal worth calling \
-out explicitly, especially if placement was still good.
-- A single attempt says little about consistency -- don't claim a player "is" a certain \
-type of finisher from one data point; describe what THIS attempt shows.
-- Shot angle indicates finishing tendency: an angle close to 0 (square to goal) suggests \
-a central striker profile; a wider angle suggests a natural wide/angled finisher.
-- If confidence is low, say so plainly in the note rather than writing a confident-sounding \
-note the data doesn't support.
+Apply these core scouting heuristics when interpreting the structured data:
+- Write 2-3 complete, professional, highly scout-readable sentences. NEVER end mid-sentence or cut off.
+- Do NOT simply repeat raw numbers or JSON keys back (e.g. do not say "ball_speed_kmh is 12.5"). Instead, translate the numbers into technical scouting insight.
+- Placement over power: At youth/semi-pro level, placement into target zones matters more than raw speed. A 12-15 km/h placed shot in the top corner is higher quality than a wild 40 km/h miss over the bar.
+- Weak Foot Signal: A shot taken with the player's non-dominant/weak foot is a notable positive scouting signal to highlight explicitly, especially when placement is accurate.
+- Finishing Tendency: Acute/wide shot angles suggest a natural wide/angled finisher; central angles suggest a center-forward profile.
+- Uncertainty: If overall confidence is low (< 0.5), mention that the attempt had limited tracking clarity while assessing what was visible.
 
-Write 2-3 sentences. Scout-readable plain English -- interpret what the data means for \
-this player's tendencies, don't just restate the numbers back as a data readout."""
+Example note style:
+"Demonstrates strong technical control and composure to curl a left-footed attempt cleanly into the top-right corner. Prioritizes precise placement over brute power, showing great confidence on their non-dominant side."
+"""
 
 
 def generate_coaching_note(shot_data: dict):
     """
-    shot_data: the dict produced by shot_pipeline.analyze_shot -- goal_zone,
-    shot_angle_deg, ball_speed_kmh, foot, confidence, frame_of_contact.
-
-    Returns the note string, or None if generation fails (API error, missing
-    key) -- per the spec's "don't fake it" principle, a missing note should
-    stay null, not get filled with a placeholder.
+    Generates a 2-3 sentence scout note using Anthropic Claude (preferred) or Gemini.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
+    # Reload .env defensively in case it wasn't loaded at import time
+    _env_path = Path(__file__).parent / ".env"
+    if _env_path.exists():
+        for _line in _env_path.read_text().splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 
-    try:
-        client = Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=200,
-            system=SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note.",
-            }],
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        # network/API errors shouldn't crash the whole pipeline -- a clip with
-        # good geometry but a failed note is still useful output
-        print(f"coaching_note generation failed: {e}")
-        return None
+    # 1. Try Anthropic Claude if ANTHROPIC_API_KEY is configured
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if anthropic_key and anthropic_key.startswith("sk-ant-"):
+        claude_models = [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-sonnet-latest",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-haiku-20241022",
+            "claude-3-haiku-20240307",
+            "claude-3-sonnet-20240229",
+        ]
+        try:
+            from anthropic import Anthropic
+            client = Anthropic(api_key=anthropic_key)
+            for c_model in claude_models:
+                try:
+                    response = client.messages.create(
+                        model=c_model,
+                        max_tokens=500,
+                        system=SYSTEM_PROMPT,
+                        messages=[{
+                            "role": "user",
+                            "content": f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note.",
+                        }],
+                    )
+                    text = response.content[0].text.strip()
+                    if text:
+                        print(f"[coaching_note] Generated via Anthropic ({c_model})")
+                        return text
+                except Exception as me:
+                    print(f"[coaching_note] Claude model {c_model} failed: {me}")
+                    continue
+        except ImportError:
+            print("[coaching_note] ERROR: 'anthropic' package not installed. Run: .\\venv\\Scripts\\pip.exe install anthropic")
+        except Exception as e:
+            print(f"[coaching_note] Claude client failed: {e}")
+    else:
+        if anthropic_key:
+            print(f"[coaching_note] ANTHROPIC_API_KEY has unexpected format (prefix: {anthropic_key[:12]}...)")
+        else:
+            print("[coaching_note] ANTHROPIC_API_KEY not found in environment")
+
+    # 2. Try Google Gemini API if GEMINI_API_KEY / GOOGLE_API_KEY is configured
+    gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if gemini_key and not gemini_key.startswith("your-"):
+        models_to_try = [
+            ("v1beta", "gemini-2.5-flash"),
+            ("v1beta", "gemini-2.0-flash"),
+            ("v1beta", "gemini-1.5-flash"),
+            ("v1", "gemini-1.5-flash"),
+            ("v1beta", "gemini-2.5-flash-lite"),
+        ]
+
+        payload = {
+            "systemInstruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+            "contents": [
+                {
+                    "parts": [{"text": f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note."}]
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": 2000,
+                "temperature": 0.7
+            }
+        }
+
+        for api_ver, model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={gemini_key}"
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text_parts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)]
+                        text = "".join(text_parts).strip()
+                        if text:
+                            return text
+            except urllib.error.HTTPError as he:
+                if he.code == 404:
+                    continue  # try next candidate model
+                print(f"Gemini coaching_note failed ({model_name}): {he}")
+                break
+            except Exception as e:
+                print(f"Gemini coaching_note failed: {e}")
+                break
+
+    print("coaching_note generation skipped: No valid ANTHROPIC_API_KEY or GEMINI_API_KEY configured in .env")
+    return None
 
 
 # ======================================================================
