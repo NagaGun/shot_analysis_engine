@@ -26,6 +26,35 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 FC_JUGGLE_DIR = os.path.join(REPO_ROOT, "fc_juggle")
 sys.path.insert(0, FC_JUGGLE_DIR)
 
+
+def _is_repo_venv_python() -> bool:
+    expected = os.path.normcase(os.path.abspath(os.path.join(REPO_ROOT, "venv", "Scripts", "python.exe")))
+    return os.path.normcase(os.path.abspath(sys.executable)) == expected
+
+
+def _validate_python_env():
+    if _is_repo_venv_python():
+        return
+
+    try:
+        import mediapipe as mp
+        if hasattr(mp, "solutions"):
+            return
+    except Exception:
+        pass
+
+    venv_python = os.path.join(REPO_ROOT, "venv", "Scripts", "python.exe")
+    sys.exit(
+        "ERROR: Incompatible Python environment.\n"
+        "This project requires the repo virtualenv interpreter because "
+        "fc_juggle/utils/vision_estimate.py uses MediaPipe with mp.solutions.pose.\n\n"
+        f"Run the script like:\n  {venv_python} video_driver.py <video_path> <clip_id>\n\n"
+        "Future work can make vision_estimate.py support both mp.solutions and mediapipe.tasks."
+    )
+
+
+_validate_python_env()
+
 # vision_estimate.py loads its YOLO weights via a path relative to the
 # current working directory ("./models/finetuned.pt"), which only resolves
 # correctly if cwd is fc_juggle/ itself -- true when that repo's own
@@ -98,11 +127,14 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
     return result
 
 
-def run_batch(clips: list, calib_path: str = "calibrations.json", generate_note: bool = True):
+def run_batch(clips: list, calib_path: str = "calibrations.json", generate_note: bool = True, stop_on_error: bool = True):
     """
     clips: list of (video_path, clip_id) tuples -- your 10 test clips.
     Returns a list of result dicts, and writes them to results.json so
     you have a record to show your manager alongside the code.
+
+    By default, stop_on_error=True so the script halts on the first
+    clip that fails with an error instead of continuing through the batch.
     """
     results = []
     for video_path, clip_id in clips:
@@ -110,6 +142,10 @@ def run_batch(clips: list, calib_path: str = "calibrations.json", generate_note:
         result = run_on_video(video_path, clip_id, calib_path, generate_note)
         results.append(result)
         print(json.dumps(result, indent=2))
+
+        if stop_on_error and result.get("error"):
+            print(f"Stopping batch because clip {clip_id} failed: {result['error']}")
+            break
 
     with open("results.json", "w") as f:
         json.dump(results, f, indent=2)

@@ -225,6 +225,13 @@ The pipeline checks `ANTHROPIC_API_KEY` first, then falls back to `GEMINI_API_KE
 ./venv/bin/python video_driver.py
 ```
 
+> Important: this project is currently tested against the repo virtual environment.
+> `fc_juggle/utils/vision_estimate.py` depends on MediaPipe with `mp.solutions.pose`.
+> If you run with a different Python interpreter, the script will exit with a clear error and ask you to use the `venv` Python.
+>
+> The coaching note is generated only when the clip produces a valid shot result and a working Gemini API request.
+> If `coaching_note` does not appear, verify `.env` contains a valid `GEMINI_API_KEY` or `GOOGLE_API_KEY` and that network access to the Gemini endpoint is available.
+>
 This will:
 1. Auto-discover all `.mp4` files in `fc_juggle/source_data/`
 2. Process each clip through the full pipeline
@@ -246,6 +253,8 @@ This will:
 ```
 
 This forces the pipeline to re-detect goal corners rather than using cached homographies.
+
+> Future improvement: make `fc_juggle/utils/vision_estimate.py` support both `mp.solutions` and `mediapipe.tasks` so the repository is not tied to a single MediaPipe API flavor.
 
 ---
 

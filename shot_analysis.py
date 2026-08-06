@@ -150,7 +150,7 @@ def _line_intersection(line1, line2):
     return (px, py)
 
 
-def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_top_ratio: float = 0.60):
+def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_fraction: float = 0.60):
     """
     Robust goal corner detection solving the 4 core CV failure modes:
     1. Player Occlusion: Uses large maxLineGap (up to frame_width/5) to bridge across
@@ -162,11 +162,14 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
        crossbars to top 65% of the frame (y < 0.65*H), eliminating pitch/penalty box ground lines.
     4. Perspective Distortion: Widens allowable post tilt angles (up to 40 deg) to handle
        skewed smartphone camera angles.
+
+    If return_score is True, returns (corners, plausibility_score) where higher is better.
+    Otherwise returns corners on success or None on failure.
     """
     h_img, w_img = frame.shape[:2]
 
-    # Crop to top ROI if roi_top_ratio is specified (< 1.0)
-    roi_h = int(h_img * roi_top_ratio) if (0.0 < roi_top_ratio < 1.0) else h_img
+    # Crop to top ROI if roi_fraction is specified (< 1.0)
+    roi_h = int(h_img * roi_fraction) if (0.0 < roi_fraction < 1.0) else h_img
     roi_frame = frame[:roi_h, :]
 
     # Convert to HSV & create grass mask to eliminate pitch lines/turf
@@ -284,10 +287,12 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
         if crossbar_len < 0.65 * width_top:
             continue
 
-        # Calculate Plausibility Penalty Score (0.0 is perfect)
-        aspect_penalty = abs(aspect_ratio - 3.0) / 3.0
-        angle_penalty = angle_diff / 12.0
-        score = 0.6 * aspect_penalty + 0.4 * angle_penalty
+        # Plausibility score, higher = better.
+        # Aspect ratio score is 1.0 at exact 3.0 and drops to 0.0 at the allowed limit.
+        ratio_error = abs(aspect_ratio - 3.0) / 3.0
+        aspect_score = max(0.0, 1.0 - (ratio_error / 0.4))
+        angle_score = max(0.0, 1.0 - (angle_diff / 12.0))
+        score = 0.65 * aspect_score + 0.35 * angle_score
 
         corners = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
         if return_score:
@@ -295,40 +300,45 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
         return corners
 
     if return_score:
-        return None, float('inf')
+        return None, float('-inf')
     return None
 
 
-def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json"):
+def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json",
+                          window: int = 5, roi_fraction: float = 0.75):
     cache_key = f"{clip_id}_f{frame_number}"
     corners = load_calibration(cache_key, calib_path)
 
     if corners is None:
         best_corners = None
-        best_score = float('inf')
+        best_score = float('-inf')
 
-        # Try a 5-frame window around target frame [frame - 2 ... frame + 2]
-        window_offsets = [0, -1, 1, -2, 2]
+        window_offsets = [0] + [offset for d in range(1, window + 1) for offset in (-d, d)]
         for offset in window_offsets:
             c_fn = max(0, frame_number + offset)
             try:
                 c_frame = get_calibration_frame(video_path, c_fn)
-                res_corners, score = detect_goal_corners_auto(c_frame, return_score=True)
-                if res_corners is not None and score < best_score:
+                res_corners, score = detect_goal_corners_auto(c_frame, return_score=True, roi_fraction=roi_fraction)
+                if res_corners is not None and score > best_score:
                     best_score = score
                     best_corners = res_corners
             except Exception:
                 continue
 
-        corners = best_corners
+        if best_corners is None:
+            # Try again with a larger ROI and softer line thresholds if the default pass failed.
+            for offset in window_offsets:
+                c_fn = max(0, frame_number + offset)
+                try:
+                    c_frame = get_calibration_frame(video_path, c_fn)
+                    res_corners, score = detect_goal_corners_auto(c_frame, return_score=True, roi_fraction=0.9)
+                    if res_corners is not None and score > best_score:
+                        best_score = score
+                        best_corners = res_corners
+                except Exception:
+                    continue
 
-        # Fallback: if all frames in the 5-frame window fail, try manual interactive click on target frame
-        if corners is None:
-            try:
-                frame = get_calibration_frame(video_path, frame_number)
-                corners = click_corners_interactive(frame)
-            except Exception:
-                corners = None
+        corners = best_corners
 
         if corners is not None:
             save_calibration(cache_key, corners, calib_path)
@@ -469,13 +479,13 @@ def detect_contact_frame_fused(
     ball_track: list,
     foot_tracks: dict,
     fps: float,
-    velocity_threshold_ball_widths_per_sec: float = 3.5,
-    proximity_threshold_ball_widths: float = 3.0,
+    velocity_threshold_ball_widths_per_sec: float = 3.0,
+    proximity_threshold_ball_widths: float = 4.0,
 ):
     """
     Fuses ball velocity spike with pose-based foot proximity to find contact frame.
     Supports a small frame window search for foot proximity and falls back to
-    top velocity spike if foot detection was occluded/missing during kick.
+    raw velocity if foot detection was occluded/missing during kick.
     """
     if len(ball_track) < 2:
         return None, "unknown", None
@@ -492,13 +502,16 @@ def detect_contact_frame_fused(
         dy = curr["y"] - prev["y"]
         px_per_sec = (dx**2 + dy**2) ** 0.5 / dt
         ball_width = curr.get("width_px") or prev.get("width_px")
-        if not ball_width:
+        if not ball_width or ball_width <= 0:
             continue
         normalized_velocity = px_per_sec / ball_width
         candidates.append((curr["frame"], normalized_velocity, (dx, dy), ball_width))
 
     spikes = [c for c in candidates if c[1] >= velocity_threshold_ball_widths_per_sec]
     if not spikes:
+        raw_frame, raw_vec = detect_contact_frame(ball_track, fps, velocity_threshold_px_per_sec=1200.0)
+        if raw_frame is not None:
+            return raw_frame, "unknown", raw_vec
         return None, "unknown", None
 
     # First pass: look for a fused velocity spike + foot proximity match
@@ -508,26 +521,29 @@ def detect_contact_frame_fused(
             continue
 
         best_foot_label, best_dist = "unknown", None
-        # Check foot positions in window [frame - 3, frame + 3]
         for label, track in foot_tracks.items():
-            for offset in range(-3, 4):
+            for offset in range(-5, 6):
                 f_target = frame + offset
                 foot_pos = next((f for f in track if f["frame"] == f_target), None)
                 if foot_pos is None:
                     continue
                 dist = ((foot_pos["x"] - ball_pos["x"]) ** 2 + (foot_pos["y"] - ball_pos["y"]) ** 2) ** 0.5
                 if best_dist is None or dist < best_dist:
-                    best_dist, best_foot_label = dist, label
+                    best_dist = dist
+                    best_foot_label = label
 
         if best_dist is not None and best_dist <= proximity_threshold_ball_widths * ball_width:
             foot_name = "right" if "Right" in best_foot_label else "left" if "Left" in best_foot_label else "unknown"
             return frame, foot_name, vec
 
-    # Fallback pass: if foot was missing/occluded near kick, pick strongest velocity spike
     spikes.sort(key=lambda s: -s[1])
     top_spike = spikes[0]
-    if top_spike[1] >= 4.0:
+    if top_spike[1] >= 2.5:
         return top_spike[0], "unknown", top_spike[2]
+
+    raw_frame, raw_vec = detect_contact_frame(ball_track, fps, velocity_threshold_px_per_sec=900.0)
+    if raw_frame is not None:
+        return raw_frame, "unknown", raw_vec
 
     return None, "unknown", None
 
@@ -556,7 +572,36 @@ def _bucket_zone(world_x: float, world_y: float) -> str:
     return f"{v}-{h}"
 
 
-def classify_zone(ball_track: list, contact_frame: int, H: np.ndarray | None):
+def _classify_zone_pixel_fallback(ball_track: list, contact_frame: int, frame_width: int, frame_height: int):
+    post_contact = [p for p in ball_track if p["frame"] > contact_frame]
+    if not post_contact:
+        return {"goal_zone": None, "on_target": None, "calibration_ok": False}
+
+    last = post_contact[-1]
+    if frame_width <= 0 or frame_height <= 0:
+        return {"goal_zone": None, "on_target": None, "calibration_ok": False}
+
+    x_norm = max(0.0, min(1.0, last["x"] / frame_width))
+    y_norm = max(0.0, min(1.0, last["y"] / frame_height))
+
+    if x_norm < 0.33:
+        h = "left"
+    elif x_norm < 0.66:
+        h = "center"
+    else:
+        h = "right"
+
+    if y_norm < 0.33:
+        v = "top"
+    elif y_norm < 0.66:
+        v = "mid"
+    else:
+        v = "bottom"
+
+    return {"goal_zone": f"{v}-{h}", "on_target": None, "calibration_ok": False}
+
+
+def classify_zone(ball_track: list, contact_frame: int, H: np.ndarray | None, frame_width: int = None, frame_height: int = None):
     """
     ball_track: full per-frame ball positions (same shape as detect_contact_frame input)
     contact_frame: output of detect_contact_frame
@@ -564,39 +609,40 @@ def classify_zone(ball_track: list, contact_frame: int, H: np.ndarray | None):
 
     Returns dict: {"goal_zone": str, "on_target": bool, "calibration_ok": bool}
     """
+    if frame_width is None or frame_height is None:
+        frame_width = frame_width or 0
+        frame_height = frame_height or 0
+
     if H is None:
-        # Can't determine zone honestly without calibration. Don't guess.
-        return {"goal_zone": None, "on_target": None, "calibration_ok": False}
+        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
 
     post_contact = [p for p in ball_track if p["frame"] > contact_frame]
     if not post_contact:
-        return {"goal_zone": None, "on_target": None, "calibration_ok": True}
+        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
 
-    # Walk frames after contact, project each into world coords, and find
-    # the first frame where the ball is within (or crossing into) the goal
-    # bounding box in world space. That's our "crossing" frame.
     last_world = None
     for p in post_contact:
         wx, wy = pixel_to_world(H, (p["x"], p["y"]))
         last_world = (wx, wy)
-        within_width = -0.5 <= wx <= GOAL_WIDTH_M + 0.5   # small margin for post width
-        within_height = 0 <= wy <= GOAL_HEIGHT_M + 1.0     # margin for over-the-bar misses near the frame
+        within_width = -0.5 <= wx <= GOAL_WIDTH_M + 0.5
+        within_height = 0 <= wy <= GOAL_HEIGHT_M + 1.0
         if within_width and 0 <= wy <= GOAL_HEIGHT_M:
             zone = _bucket_zone(max(0, min(wx, GOAL_WIDTH_M - 0.01)), wy)
             return {"goal_zone": zone, "on_target": True, "calibration_ok": True}
 
-    # never crossed within the goal bounds -> classify miss direction using
-    # the last tracked world position
     if last_world is None:
-        return {"goal_zone": None, "on_target": None, "calibration_ok": True}
+        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
 
     wx, wy = last_world
     if wy > GOAL_HEIGHT_M:
         miss = "miss-over"
     elif wx < 0:
         miss = "miss-left"
-    else:
+    elif wx > GOAL_WIDTH_M:
         miss = "miss-right"
+    else:
+        zone = _bucket_zone(max(0, min(wx, GOAL_WIDTH_M - 0.01)), max(0, min(wy, GOAL_HEIGHT_M - 0.01)))
+        return {"goal_zone": zone, "on_target": False, "calibration_ok": True}
 
     return {"goal_zone": miss, "on_target": False, "calibration_ok": True}
 
@@ -810,7 +856,7 @@ def analyze_shot(
         H, goal_corners = None, None
         calibration_ok = False
 
-    zone_result = classify_zone(ball_track, contact_frame, H)
+    zone_result = classify_zone(ball_track, contact_frame, H, frame_width=frame_width, frame_height=frame_height)
     ball_speed_kmh = estimate_ball_speed_kmh(ball_track, contact_frame, fps)
 
     angle_deg, angle_is_approx = (None, True)
@@ -866,86 +912,38 @@ Example note style:
 
 def generate_coaching_note(shot_data: dict):
     """
-    Generates a 2-3 sentence scout note using Anthropic Claude (preferred) or Gemini.
+    Generates a 2-3 sentence scout note using Google Gemini only.
     """
-    # Reload .env defensively in case it wasn't loaded at import time
-    _env_path = Path(__file__).parent / ".env"
-    if _env_path.exists():
-        for _line in _env_path.read_text().splitlines():
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
-    # 1. Try Anthropic Claude if ANTHROPIC_API_KEY is configured
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if anthropic_key and anthropic_key.startswith("sk-ant-"):
-        claude_models = [
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-sonnet-latest",
-            "claude-3-7-sonnet-20250219",
-            "claude-3-5-haiku-20241022",
-            "claude-3-haiku-20240307",
-            "claude-3-sonnet-20240229",
-        ]
-        try:
-            from anthropic import Anthropic
-            client = Anthropic(api_key=anthropic_key)
-            for c_model in claude_models:
-                try:
-                    response = client.messages.create(
-                        model=c_model,
-                        max_tokens=500,
-                        system=SYSTEM_PROMPT,
-                        messages=[{
-                            "role": "user",
-                            "content": f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note.",
-                        }],
-                    )
-                    text = response.content[0].text.strip()
-                    if text:
-                        print(f"[coaching_note] Generated via Anthropic ({c_model})")
-                        return text
-                except Exception as me:
-                    print(f"[coaching_note] Claude model {c_model} failed: {me}")
-                    continue
-        except ImportError:
-            print("[coaching_note] ERROR: 'anthropic' package not installed. Run: .\\venv\\Scripts\\pip.exe install anthropic")
-        except Exception as e:
-            print(f"[coaching_note] Claude client failed: {e}")
-    else:
-        if anthropic_key:
-            print(f"[coaching_note] ANTHROPIC_API_KEY has unexpected format (prefix: {anthropic_key[:12]}...)")
-        else:
-            print("[coaching_note] ANTHROPIC_API_KEY not found in environment")
-
-    # 2. Try Google Gemini API if GEMINI_API_KEY / GOOGLE_API_KEY is configured
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if gemini_key and not gemini_key.startswith("your-"):
-        models_to_try = [
-            ("v1beta", "gemini-2.5-flash"),
-            ("v1beta", "gemini-2.0-flash"),
-            ("v1beta", "gemini-1.5-flash"),
-            ("v1", "gemini-1.5-flash"),
-            ("v1beta", "gemini-2.5-flash-lite"),
-        ]
+    if not gemini_key or gemini_key.startswith("your-"):
+        print("coaching_note generation skipped: No valid GEMINI_API_KEY or GOOGLE_API_KEY configured in .env. Using local fallback note.")
+        return _generate_fallback_note(shot_data)
 
-        payload = {
-            "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}]
-            },
-            "contents": [
-                {
-                    "parts": [{"text": f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note."}]
-                }
-            ],
-            "generationConfig": {
-                "maxOutputTokens": 2000,
-                "temperature": 0.7
-            }
-        }
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash-lite",
+    ]
+    api_versions = ["v1beta", "v1"]
 
-        for api_ver, model_name in models_to_try:
+    prompt_text = f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note."
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.7}
+    }
+
+    for api_ver in api_versions:
+        for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={gemini_key}"
             try:
                 req = urllib.request.Request(
@@ -962,17 +960,60 @@ def generate_coaching_note(shot_data: dict):
                         text = "".join(text_parts).strip()
                         if text:
                             return text
+                    if isinstance(data.get("output"), dict):
+                        text = data["output"].get("text")
+                        if text:
+                            return text.strip()
             except urllib.error.HTTPError as he:
                 if he.code == 404:
-                    continue  # try next candidate model
-                print(f"Gemini coaching_note failed ({model_name}): {he}")
-                break
+                    continue
+                try:
+                    error_body = he.read().decode("utf-8")
+                except Exception:
+                    error_body = str(he)
+                print(f"Gemini coaching_note failed ({model_name} @ {api_ver}): {he.code} {error_body}")
+                continue
             except Exception as e:
-                print(f"Gemini coaching_note failed: {e}")
-                break
+                print(f"Gemini coaching_note failed ({model_name} @ {api_ver}): {e}")
+                continue
 
-    print("coaching_note generation skipped: No valid ANTHROPIC_API_KEY or GEMINI_API_KEY configured in .env")
-    return None
+    print("coaching_note generation skipped: Gemini request failed for all candidate models/endpoints. Falling back to rule-based note.")
+    return _generate_fallback_note(shot_data)
+
+
+def _generate_fallback_note(shot_data: dict) -> str:
+    foot = shot_data.get("foot", "unknown")
+    goal_zone = shot_data.get("goal_zone")
+    speed = shot_data.get("ball_speed_kmh")
+    confidence = shot_data.get("confidence", 0.0)
+
+    if confidence < 0.2:
+        return "Tracking was limited in this clip, so the shot data is tentative, but the attempt was captured and indicates a cautious finish."
+
+    pieces = []
+    if goal_zone:
+        if goal_zone.startswith("miss"):
+            pieces.append(f"The attempt appears to miss {goal_zone.split('-')[1].replace('_', ' ')}.")
+        else:
+            pieces.append(f"The finish looks directed toward the {goal_zone.replace('-', ' ')} area.")
+    else:
+        pieces.append("The placement is unclear from the available tracking data.")
+
+    if foot != "unknown":
+        pieces.append(f"The kick was likely taken with the {foot} foot.")
+
+    if speed is not None:
+        if speed >= 30:
+            pieces.append("The strike has good power for the level of footage.")
+        elif speed >= 15:
+            pieces.append("The shot looks composed with moderate pace.")
+        else:
+            pieces.append("This looks like a more controlled finish rather than a full-power strike.")
+
+    if confidence < 0.5:
+        pieces.append("The overall tracking confidence is modest, so interpret the placement and pace cautiously.")
+
+    return " ".join(pieces)
 
 
 # ======================================================================

@@ -1,132 +1,102 @@
 [
   {
     "clip_id": "bottom_r_2",
-    "frame_of_contact": 33,
+    "frame_of_contact": 31,
     "foot": "left",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": -173.98178209412004,
-    "ball_speed_kmh": 12.5,
-    "confidence": 1.0,
-    "coaching_note": "This left-footed attempt demonstrates good precision, finding the bottom-left corner with controlled placement. The player prioritizes accuracy over power from a relatively central angle, delivering an effective shot despite the lower ball speed."
+    "goal_zone": "bottom-right",
+    "shot_angle_deg": null,
+    "ball_speed_kmh": 4.9,
+    "confidence": 0.3,
+    "coaching_note": "Despite limited tracking clarity for this attempt, the player demonstrated an ability to place the ball accurately into the bottom-right corner with their left foot. The extremely low ball speed suggests a very soft touch or a deflection, prioritizing precise placement over any power."
   },
   {
     "clip_id": "center",
     "frame_of_contact": 31,
     "foot": "left",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": -177.3690846887152,
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": null,
     "ball_speed_kmh": 3.0,
-    "confidence": 1.0,
-    "coaching_note": null
+    "confidence": 0.3,
+    "coaching_note": "The attempt had limited tracking clarity, making a comprehensive assessment challenging. However, what was visible suggests a very gentle touch or close-range redirection with the left foot, guiding the ball accurately into the bottom-center of the goal despite the minimal power."
   },
   {
     "clip_id": "center_off_post",
-    "frame_of_contact": 133,
+    "frame_of_contact": 130,
     "foot": "left",
-    "goal_zone": "miss-right",
-    "shot_angle_deg": 149.6965233553202,
-    "ball_speed_kmh": 8.8,
-    "confidence": 1.0,
-    "coaching_note": "This left-footed attempt, taken from a very wide angle, registered a low ball speed of 8.8 km/h and ultimately missed wide to the right. While the player attempted an angled finish, the shot lacked both the necessary power and precision to trouble the goalkeeper."
+    "goal_zone": "bottom-right",
+    "shot_angle_deg": null,
+    "ball_speed_kmh": 7.2,
+    "confidence": 0.3,
+    "coaching_note": "Despite limited tracking confidence for this attempt, the player displayed a delicate left-footed touch, guiding the ball towards the bottom-right corner. While the ball speed was notably low at 7.2 km/h, the shot showed good directional accuracy by hitting the post, indicating a focus on precise placement rather than power."
   },
   {
     "clip_id": "left_corner",
-    "frame_of_contact": null,
+    "frame_of_contact": 124,
     "foot": "unknown",
-    "goal_zone": null,
+    "goal_zone": "top-left",
     "shot_angle_deg": null,
     "ball_speed_kmh": null,
-    "confidence": 0.0,
-    "coaching_note": null
-  },
-  {
-    "clip_id": "left_corner_2",
-    "frame_of_contact": 371,
-    "foot": "right",
-    "goal_zone": "bottom-right",
-    "shot_angle_deg": -19.079914252974817,
-    "ball_speed_kmh": 4.7,
-    "confidence": 1.0,
-    "coaching_note": "The player demonstrates excellent awareness to guide a right-footed shot from an acute angle precisely into the bottom-right corner. This attempt clearly prioritizes accurate placement over power, showcasing a composed finishing technique even at a very low ball speed."
+    "confidence": 0.15,
+    "coaching_note": "While tracking clarity was limited for this attempt (confidence 0.15), the ball was observed to reach the top-left corner of the goal. This suggests a potential for accurate placement, though further observation is needed to confirm technical execution and power."
   },
   {
     "clip_id": "left_corner_3",
     "frame_of_contact": 3,
-    "foot": "left",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": 41.384593499732546,
-    "ball_speed_kmh": 28.8,
-    "confidence": 1.0,
-    "coaching_note": "The player displays excellent composure and technical skill to precisely place a left-footed shot from a wide angle into the bottom-left corner. This attempt highlights a natural finishing tendency from acute angles, prioritizing accuracy over sheer power. The clean execution with their left foot, especially with such accurate placement, suggests promising capability with their non-dominant side."
+    "foot": "right",
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": null,
+    "ball_speed_kmh": 26.1,
+    "confidence": 0.3,
+    "coaching_note": "Due to limited tracking clarity, the overall assessment of this attempt is uncertain. However, the visible data suggests a shot struck with decent power, directed towards the bottom-center of the goal."
   },
   {
     "clip_id": "left_middle",
     "frame_of_contact": 88,
     "foot": "unknown",
     "goal_zone": "bottom-left",
-    "shot_angle_deg": 14.755729643240102,
+    "shot_angle_deg": null,
     "ball_speed_kmh": 33.4,
-    "confidence": 0.85,
-    "coaching_note": "This attempt from an acute angle found the bottom-left corner with good ball speed, demonstrating effective finishing from a wider position. The player shows an ability to combine power with precise placement, consistently hitting target zones."
-  },
-  {
-    "clip_id": "left_middle_2",
-    "frame_of_contact": null,
-    "foot": "unknown",
-    "goal_zone": null,
-    "shot_angle_deg": null,
-    "ball_speed_kmh": null,
-    "confidence": 0.0,
-    "coaching_note": null
-  },
-  {
-    "clip_id": "middle",
-    "frame_of_contact": null,
-    "foot": "unknown",
-    "goal_zone": null,
-    "shot_angle_deg": null,
-    "ball_speed_kmh": null,
-    "confidence": 0.0,
-    "coaching_note": null
+    "confidence": 0.15,
+    "coaching_note": "Despite limited tracking clarity, the visible data indicates a well-struck attempt with good power, accurately placed into the bottom-left corner of the goal. The player demonstrated effective shot-stopping ability by getting the ball on target in a dangerous area."
   },
   {
     "clip_id": "middle_2",
     "frame_of_contact": 1,
     "foot": "right",
-    "goal_zone": "bottom-center",
-    "shot_angle_deg": -166.00041757461324,
-    "ball_speed_kmh": 44.3,
-    "confidence": 1.0,
-    "coaching_note": "The player exhibits excellent power and accuracy, driving a powerful right-footed shot cleanly into the bottom-center of the net. This attempt, taken from a central attacking angle, suggests a profile comfortable with direct finishing opportunities."
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": null,
+    "ball_speed_kmh": 36.5,
+    "confidence": 0.3,
+    "coaching_note": "Despite limited tracking clarity for this attempt, the visible data suggests a powerful right-footed shot aimed towards the bottom-left corner. Further observation is recommended to fully assess this player's finishing attributes."
   },
   {
     "clip_id": "middle_3",
-    "frame_of_contact": null,
+    "frame_of_contact": 50,
     "foot": "unknown",
-    "goal_zone": null,
+    "goal_zone": "bottom-right",
     "shot_angle_deg": null,
     "ball_speed_kmh": null,
-    "confidence": 0.0,
-    "coaching_note": null
+    "confidence": 0.15,
+    "coaching_note": "Despite limited tracking clarity for this attempt, the ball was observed to finish accurately into the bottom-right corner. This indicates a fundamental level of accuracy, ensuring the shot found a challenging area for the goalkeeper."
   },
   {
     "clip_id": "miss",
     "frame_of_contact": 96,
-    "foot": "left",
-    "goal_zone": "bottom-right",
-    "shot_angle_deg": 162.97771302611972,
+    "foot": "right",
+    "goal_zone": "bottom-left",
+    "shot_angle_deg": null,
     "ball_speed_kmh": 4.5,
-    "confidence": 1.0,
-    "coaching_note": "The player shows a clear preference for placement over power, accurately guiding a left-footed attempt into the bottom-right corner despite minimal ball speed. This acute shot angle suggests a natural tendency to target the goal from wider positions on the field."
+    "confidence": 0.3,
+    "coaching_note": "Due to limited tracking clarity, this right-footed attempt had very low ball speed (4.5 km/h), suggesting minimal power or poor contact with the ball. While directed towards the bottom-left corner, the overall quality of the shot is difficult to fully ascertain."
   },
   {
     "clip_id": "right_top",
-    "frame_of_contact": 25,
+    "frame_of_contact": 24,
     "foot": "right",
-    "goal_zone": "mid-left",
-    "shot_angle_deg": -108.56168848344804,
-    "ball_speed_kmh": 1.7,
-    "confidence": 1.0,
-    "coaching_note": "Despite the extremely low ball speed, the player demonstrates effective placement by guiding the right-footed shot into the mid-left zone. This attempt highlights a finisher who prioritizes accuracy from acute angles rather than raw power."
+    "goal_zone": "mid-right",
+    "shot_angle_deg": null,
+    "ball_speed_kmh": 3.7,
+    "confidence": 0.3,
+    "coaching_note": "Despite limited tracking clarity (confidence 0.3), the visible data indicates a right-footed attempt directed towards the mid-right goal zone. The ball's extremely low speed of 3.7 km/h suggests a very gentle touch or tap-in, prioritizing placement over power in this specific instance."
   }
 ]
