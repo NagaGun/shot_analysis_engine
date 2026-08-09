@@ -264,6 +264,19 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
         if avg_height <= 0 or width_top < w_img * 0.15:
             continue
 
+        # A common false positive is a real crossbar combined with an unrelated
+        # vertical line. It produces a convincing average aspect ratio even when
+        # one "post" has almost no height, or its inferred base is above the bar.
+        # Reject those shapes before they can be cached as a calibration.
+        min_post_height = max(12.0, h_img * 0.04)
+        if height_l < min_post_height or height_r < min_post_height:
+            continue
+        if bottom_left[1] <= top_left[1] + 4.0 or bottom_right[1] <= top_right[1] + 4.0:
+            continue
+        height_balance = min(height_l, height_r) / max(height_l, height_r)
+        if height_balance < 0.18:
+            continue
+
         # 1. Aspect Ratio Check (Target: 7.32m / 2.44m = 3.0, allow ±40% range [1.8, 4.2])
         aspect_ratio = width_top / avg_height
         if not (1.8 <= aspect_ratio <= 4.2):
@@ -292,7 +305,9 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
         ratio_error = abs(aspect_ratio - 3.0) / 3.0
         aspect_score = max(0.0, 1.0 - (ratio_error / 0.4))
         angle_score = max(0.0, 1.0 - (angle_diff / 12.0))
-        score = 0.65 * aspect_score + 0.35 * angle_score
+        # Prefer complete, balanced post pairs rather than merely the first
+        # horizontal/vertical combination that passes a loose aspect check.
+        score = 0.50 * aspect_score + 0.30 * angle_score + 0.20 * height_balance
 
         corners = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
         if return_score:
@@ -305,7 +320,7 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
 
 
 def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json",
-                          window: int = 5, roi_fraction: float = 0.75):
+                          window: int = 5, roi_fraction: float = 0.75, manual_fallback: bool = True):
     cache_key = f"{clip_id}_f{frame_number}"
     corners = load_calibration(cache_key, calib_path)
 
@@ -339,6 +354,16 @@ def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_
                     continue
 
         corners = best_corners
+
+        # Automatic calibration is deliberately conservative. When it cannot
+        # find a geometrically plausible goal, use four operator clicks rather
+        # than silently projecting the shot through a bad homography.
+        if corners is None and manual_fallback:
+            try:
+                frame = get_calibration_frame(video_path, frame_number)
+                corners = click_corners_interactive(frame)
+            except Exception:
+                corners = None
 
         if corners is not None:
             save_calibration(cache_key, corners, calib_path)
@@ -892,28 +917,50 @@ def analyze_shot(
 # from coaching_note.py
 # ======================================================================
 
-MODEL_GEMINI = "gemini-1.5-flash"
-MODEL_CLAUDE = "claude-3-5-sonnet-latest"
+SYSTEM_PROMPT = """You are a football scout writing a concise 2-3 sentence coaching note from one structured shot-analysis record.
 
-SYSTEM_PROMPT = """You are a senior football (soccer) scouting analyst writing concise evaluation notes for academy and scouting directors based on computer-vision shot metrics.
-
-Apply these core scouting heuristics when interpreting the structured data:
-- Write 2-3 complete, professional, highly scout-readable sentences. NEVER end mid-sentence or cut off.
-- Do NOT simply repeat raw numbers or JSON keys back (e.g. do not say "ball_speed_kmh is 12.5"). Instead, translate the numbers into technical scouting insight.
-- Placement over power: At youth/semi-pro level, placement into target zones matters more than raw speed. A 12-15 km/h placed shot in the top corner is higher quality than a wild 40 km/h miss over the bar.
-- Weak Foot Signal: A shot taken with the player's non-dominant/weak foot is a notable positive scouting signal to highlight explicitly, especially when placement is accurate.
-- Finishing Tendency: Acute/wide shot angles suggest a natural wide/angled finisher; central angles suggest a center-forward profile.
-- Uncertainty: If overall confidence is low (< 0.5), mention that the attempt had limited tracking clarity while assessing what was visible.
-
-Example note style:
-"Demonstrates strong technical control and composure to curl a left-footed attempt cleanly into the top-right corner. Prioritizes precise placement over brute power, showing great confidence on their non-dominant side."
+Translate the evidence into natural scouting language rather than repeating JSON fields. At youth and semi-professional level, placement matters more than raw power. Foot used is a useful scouting signal, but never label it a weak or dominant foot unless that fact is provided. A wide angle can suggest comfort finishing from wide areas, while a central angle can suggest a central-striker profile; treat the angle as approximate. Mention limited tracking confidence when relevant and never invent match context, pressure, or technique not present in the data.
 """
 
 
-def generate_coaching_note(shot_data: dict):
-    """
-    Generates a 2-3 sentence scout note using Google Gemini only.
-    """
+_gemini_models_cache: list[str] | None = None
+
+
+def _available_gemini_models(gemini_key: str) -> list[str]:
+    """Validate the key and discover models this Gemini project can use."""
+    global _gemini_models_cache
+    if _gemini_models_cache is not None:
+        return _gemini_models_cache
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as he:
+        print(f"Gemini API key validation failed: HTTP {he.code}. Check the key's Google AI Studio project and API access.")
+        _gemini_models_cache = []
+        return _gemini_models_cache
+    except Exception as exc:
+        print(f"Gemini model discovery failed: {exc}")
+        _gemini_models_cache = []
+        return _gemini_models_cache
+
+    models = []
+    for model in data.get("models", []):
+        if "generateContent" not in model.get("supportedGenerationMethods", []):
+            continue
+        name = model.get("name", "")
+        if name.startswith("models/"):
+            name = name.removeprefix("models/")
+        if name:
+            models.append(name)
+
+    _gemini_models_cache = models
+    return models
+
+
+def generate_coaching_note(shot_data: dict, attempt_history: list[dict] | None = None):
+    """Generate a coaching note from one video's structured shot data."""
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
@@ -925,70 +972,92 @@ def generate_coaching_note(shot_data: dict):
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not gemini_key or gemini_key.startswith("your-"):
         print("coaching_note generation skipped: No valid GEMINI_API_KEY or GOOGLE_API_KEY configured in .env. Using local fallback note.")
-        return _generate_fallback_note(shot_data)
+        return _generate_fallback_note(shot_data, attempt_history)
 
-    models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash-lite",
-    ]
-    api_versions = ["v1beta", "v1"]
+    available_models = _available_gemini_models(gemini_key)
+    if not available_models:
+        print("Gemini returned no usable generation models; using the local fallback note.")
+        return _generate_fallback_note(shot_data, attempt_history)
 
-    prompt_text = f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the scouting note."
+    # Respect an explicit .env preference when it is available, then prefer
+    # current Flash models, and finally use any model the key exposes.
+    requested_model = os.environ.get("GEMINI_MODEL")
+    # The 2.5 identifiers may still appear in model discovery but are retired
+    # for new users. Prefer the provider-maintained current aliases instead.
+    preferred_models = [requested_model, "gemini-flash-latest", "gemini-flash-lite-latest"]
+    models_to_try = []
+    for model_name in preferred_models + available_models:
+        if model_name and model_name in available_models and model_name not in models_to_try:
+            models_to_try.append(model_name)
+
+    prompt_text = f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the coaching note."
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.7}
     }
 
-    for api_ver in api_versions:
-        for model_name in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={gemini_key}"
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)]
+                text = "".join(text_parts).strip()
+                if text:
+                    return text
+            if isinstance(data.get("output"), dict):
+                text = data["output"].get("text")
+                if text:
+                    return text.strip()
+
+            print(f"Gemini coaching_note returned no text ({model_name}); using the local fallback.")
+            return _generate_fallback_note(shot_data, attempt_history)
+        except urllib.error.HTTPError as he:
+            if he.code == 404:
+                print(f"Gemini model unavailable ({model_name}); trying the next discovered model.")
+                continue
             try:
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        text_parts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)]
-                        text = "".join(text_parts).strip()
-                        if text:
-                            return text
-                    if isinstance(data.get("output"), dict):
-                        text = data["output"].get("text")
-                        if text:
-                            return text.strip()
-            except urllib.error.HTTPError as he:
-                if he.code == 404:
-                    continue
-                try:
-                    error_body = he.read().decode("utf-8")
-                except Exception:
-                    error_body = str(he)
-                print(f"Gemini coaching_note failed ({model_name} @ {api_ver}): {he.code} {error_body}")
-                continue
-            except Exception as e:
-                print(f"Gemini coaching_note failed ({model_name} @ {api_ver}): {e}")
-                continue
+                error_body = he.read().decode("utf-8")
+                error_data = json.loads(error_body).get("error", {})
+                message = error_data.get("message", "Gemini request failed")
+            except Exception:
+                message = str(he)
 
-    print("coaching_note generation skipped: Gemini request failed for all candidate models/endpoints. Falling back to rule-based note.")
-    return _generate_fallback_note(shot_data)
+            if he.code == 429:
+                print(f"Gemini quota reached ({model_name}); using the local fallback.")
+            else:
+                print(f"Gemini coaching_note failed ({model_name}): HTTP {he.code}; using the local fallback.")
+            return _generate_fallback_note(shot_data, attempt_history)
+        except Exception as e:
+            print(f"Gemini coaching_note failed ({model_name}): {e}; using the local fallback.")
+            return _generate_fallback_note(shot_data, attempt_history)
+
+    print("Gemini discovered models but none returned a coaching note; using the local fallback note.")
+    return _generate_fallback_note(shot_data, attempt_history)
 
 
-def _generate_fallback_note(shot_data: dict) -> str:
+def _generate_fallback_note(shot_data: dict, attempt_history: list[dict] | None = None) -> str:
+    """Local narrative fallback when Gemini is unavailable."""
     foot = shot_data.get("foot", "unknown")
     goal_zone = shot_data.get("goal_zone")
     speed = shot_data.get("ball_speed_kmh")
     confidence = shot_data.get("confidence", 0.0)
 
+    usable_attempts = [
+        attempt for attempt in (attempt_history or [shot_data])
+        if not attempt.get("error") and attempt.get("confidence", 0) >= 0.3
+    ]
     if confidence < 0.2:
-        return "Tracking was limited in this clip, so the shot data is tentative, but the attempt was captured and indicates a cautious finish."
+        return "Tracking was limited on this attempt, so the finishing read is tentative. The available data should be treated as a prompt for video review rather than a firm assessment."
 
     pieces = []
     if goal_zone:
@@ -999,8 +1068,11 @@ def _generate_fallback_note(shot_data: dict) -> str:
     else:
         pieces.append("The placement is unclear from the available tracking data.")
 
-    if foot != "unknown":
-        pieces.append(f"The kick was likely taken with the {foot} foot.")
+    observed_feet = {attempt.get("foot") for attempt in usable_attempts if attempt.get("foot") in {"left", "right"}}
+    if len(usable_attempts) >= 3 and len(observed_feet) == 2:
+        pieces.append("Across the usable sample, contact with both feet is an encouraging early sign of two-sided finishing.")
+    elif foot != "unknown":
+        pieces.append(f"This attempt was likely taken with the {foot} foot.")
 
     if speed is not None:
         if speed >= 30:
@@ -1010,10 +1082,12 @@ def _generate_fallback_note(shot_data: dict) -> str:
         else:
             pieces.append("This looks like a more controlled finish rather than a full-power strike.")
 
-    if confidence < 0.5:
-        pieces.append("The overall tracking confidence is modest, so interpret the placement and pace cautiously.")
+    if len(usable_attempts) < 3:
+        pieces.append("The sample is too limited to establish a consistent finishing tendency.")
+    elif confidence < 0.5:
+        pieces.append("Tracking confidence is modest, so the pattern should be checked against the video before drawing firm conclusions.")
 
-    return " ".join(pieces)
+    return " ".join(pieces[:3])
 
 
 # ======================================================================

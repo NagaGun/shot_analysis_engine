@@ -1,346 +1,183 @@
-# FutbolConnect — Shot Analysis Engine
+# FutbolConnect Shot Analysis
 
-> **Automated computer vision pipeline** that turns a raw football video clip into structured shot data — foot used, goal zone, ball speed, shot angle, and an AI-generated scouting note — with no special equipment beyond a phone camera.
+FutbolConnect Shot Analysis is a local computer-vision pipeline for extracting shot metrics from football video. It builds on the included `fc_juggle` submodule to detect the ball and player landmarks, then estimates the contact frame, striking foot, goal area, ball speed, body-orientation proxy, and a confidence score. It can also produce a short coaching note using Gemini or a local rule-based fallback.
 
----
+The repository also includes the standalone `fc_juggle` project, which provides a juggle-counting CLI and FastAPI service. The shot-analysis entry point is the root-level `video_driver.py`.
 
-## Table of Contents
+## What the shot pipeline produces
 
-- [Overview](#overview)
-- [Output Format](#output-format)
-- [How It Works](#how-it-works)
-- [Project Structure](#project-structure)
-- [Setup & Installation](#setup--installation)
-- [Configuration](#configuration)
-- [Running the Pipeline](#running-the-pipeline)
-- [Goal Zone Grid](#goal-zone-grid)
-- [Key Algorithms](#key-algorithms)
-- [Known Limitations](#known-limitations)
-- [Dependencies](#dependencies)
-
----
-
-## Overview
-
-Manual scouting is slow, expensive, and inconsistent. This engine automates the quantitative layer of shot analysis — extracting objective, measurable data from standard `.mp4` files — and augments it with an LLM-generated qualitative coaching note.
-
-**No radar guns. No tracking hardware. Just video.**
-
-The pipeline uses:
-- **YOLOv8** (fine-tuned on footballs) for ball detection
-- **MediaPipe Pose** for player body landmark tracking
-- **Kalman filtering** for trajectory smoothing
-- **OpenCV Hough transforms + homography** for goal plane calibration
-- **Google Gemini / Anthropic Claude** for AI-generated coaching notes
-
----
-
-## Output Format
-
-Each video clip produces one structured JSON record:
+For each clip, the batch runner emits a JSON object with this schema:
 
 ```json
 {
-  "clip_id": "bottom_right",
-  "frame_of_contact": 60,
+  "clip_id": "center",
+  "frame_of_contact": 31,
   "foot": "left",
-  "goal_zone": "mid-right",
-  "shot_angle_deg": -23.34,
-  "ball_speed_kmh": 103.4,
-  "confidence": 1.0,
-  "coaching_note": "Player demonstrates a composed left-footed finish into the mid-right channel, showing good awareness of goal placement under pressure. The approach angle suggests a wide attacker profile — the ability to cut inside and convert at pace is a positive scouting signal. At this level, consistent placement over power will separate elite finishers."
+  "goal_zone": "bottom-center",
+  "shot_angle_deg": null,
+  "ball_speed_kmh": 3.0,
+  "confidence": 0.3,
+  "coaching_note": "The finish looks directed toward the bottom center area."
 }
 ```
 
-All results are written to `results.json` after each batch run.
+- `frame_of_contact` is the detected kick frame, or `null` when it cannot be established.
+- `foot` is `left`, `right`, or `unknown`.
+- `goal_zone` is one of the nine goal-grid labels, a calibrated miss label (`miss-over`, `miss-left`, or `miss-right`), or `null`.
+- `shot_angle_deg` is a signed, approximate angle based on the knee line and goal edge; it is `null` without usable calibration and knee landmarks.
+- `ball_speed_kmh` is an estimate from the first three frames after contact; it can be `null` for inadequate or implausible tracking.
+- `confidence` is a 0–1 score derived from contact detection, calibration, foot attribution, FPS metadata, and angle availability.
+- `coaching_note` is generated from each clip's structured JSON when Gemini is configured; otherwise the pipeline uses a local fallback note.
 
----
+Batch results are written to `results.json`. Goal-corner detections are cached in `calibrations.json`.
 
-## How It Works
+## How it works
 
-### End-to-End Flow
-
-```
-.mp4 video file
-      │
-      ▼
-┌─────────────────────────────────────────────┐
-│ VISION LAYER (per frame)                    │
-│  • YOLOv8 fine-tuned → ball bbox [cx,cy,w,h]│
-│  • MediaPipe Pose    → 5 body landmarks     │
-│    (Left/Right Knee, Left/Right Foot, Head) │
-└───────────────────┬─────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────┐
-│ KALMAN FILTER (per POI, per axis)           │
-│  Smooths noisy detections, bridges gaps     │
-│  State: [position, velocity, acceleration]  │
-└───────────────────┬─────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────┐
-│ SHOT ANALYSIS PIPELINE                      │
-│  1. detect_contact_frame_fused()            │
-│     Velocity spike ≥ 6.0 ball-widths/sec   │
-│     + foot within 1.5 ball-widths of ball  │
-│     → contact_frame, foot label            │
-│                                             │
-│  2. calibrate_clip_auto()                   │
-│     Hough lines → goal corners → 3×3 H     │
-│     Calibrated at contact frame (not frame 0)│
-│                                             │
-│  3. classify_zone()                         │
-│     Homography projects ball → world coords │
-│     → one of 9 goal zones                  │
-│                                             │
-│  4. estimate_ball_speed_kmh()               │
-│     3-frame displacement × size calibration │
-│                                             │
-│  5. estimate_shot_angle_deg()               │
-│     Knee vector vs. goal edge vector        │
-│                                             │
-│  6. compute_confidence()                    │
-│     Weighted signal score [0.0 → 1.0]      │
-└───────────────────┬─────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────┐
-│ AI COACHING NOTE                            │
-│  Google Gemini (primary) or Claude fallback │
-│  Structured JSON → 2-3 sentence scout note  │
-└───────────────────┬─────────────────────────┘
-                    │
-                    ▼
-              results.json
+```text
+video (.mp4)
+  -> YOLOv8 football detection + MediaPipe pose landmarks
+  -> Kalman-filtered trajectories
+  -> contact, foot, calibration, zone, speed, and angle estimation
+  -> JSON result and optional coaching note
 ```
 
----
+The detector tracks the ball plus the left/right foot, knee, and head. The source `fc_juggle` tracker retains the most recent 100 measurements; the root driver passes the total processed-frame count so that reported frame numbers remain aligned on longer clips.
 
-## Project Structure
+Goal calibration uses automatic goal-post/crossbar detection near the contact frame and a homography to the regulation 7.32 m × 2.44 m goal plane. When calibration fails, zone classification falls back to the final detected ball position as a proportion of the video frame. That fallback is useful for a tentative label but is not an on-target determination.
 
-```
+## Repository layout
+
+```text
 futbolconnect-shot-analysis/
-│
-├── shot_analysis.py          # Core pipeline (all analysis logic)
-│   ├── detect_goal_corners_auto()     # Hough transform goal detection
-│   ├── detect_contact_frame_fused()   # Boot-meets-ball frame detection
-│   ├── calibrate_clip_auto()          # Goal homography calibration
-│   ├── classify_zone()                # 3×3 goal zone classification
-│   ├── estimate_ball_speed_kmh()      # Physics-based speed estimation
-│   ├── estimate_shot_angle_deg()      # Body orientation vs. goal
-│   ├── compute_confidence()           # Weighted signal scoring
-│   └── generate_coaching_note()       # Gemini/Claude AI note
-│
-├── video_driver.py           # CLI entry point & batch runner
-├── calibrations.json         # Cached goal homographies (per clip + frame)
-├── results.json              # Last batch run output
-├── .env                      # API keys (git-ignored — never commit)
-│
-└── fc_juggle/                # Git submodule (private)
-    ├── models/finetuned.pt   # YOLOv8n fine-tuned football detector
-    ├── source_data/          # Test video clips (.mp4)
+├── video_driver.py       # Shot-analysis CLI and batch runner
+├── shot_analysis.py      # Shot metrics, calibration, and coaching-note logic
+├── results.json          # Latest batch output (generated/overwritten)
+├── calibrations.json     # Cached automatic goal calibrations
+├── .env                  # Optional local Gemini key; never commit it
+└── fc_juggle/            # Git submodule: detector, tracker, juggle CLI/API, model, sample clips
+    ├── models/finetuned.pt
+    ├── source_data/
+    ├── main.py
+    ├── api.py
     └── utils/
-        ├── vision_estimate.py   # get_POI(): YOLO + MediaPipe per frame
-        ├── update_predict.py    # Measurement accumulation + KF prediction
-        └── KalmanFilter.py      # Kalman1D constant-acceleration filter
 ```
 
----
-
-## Setup & Installation
+## Setup
 
 ### Prerequisites
 
-- Python 3.11+
-- `git` with submodule support
+- Git, including submodule support
+- Python 3.12 (the supplied `fc_juggle/environment.yml` targets Python 3.12)
+- A camera-compatible OpenCV installation; GPU acceleration is optional
 
-### 1. Clone with submodules
+Clone the repository with its submodule:
 
 ```bash
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules <repository-url>
 cd futbolconnect-shot-analysis
 ```
 
-If you already cloned without submodules:
+If the repository is already cloned:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 2. Create a virtual environment
+Create and activate a virtual environment:
 
-```bash
-python -m venv venv
-
-# Windows
-.\venv\Scripts\activate
-
-# macOS / Linux
-source venv/bin/activate
+```powershell
+py -3.12 -m venv venv
+.\venv\Scripts\Activate.ps1
 ```
 
-### 3. Install dependencies
+Install the dependencies required by the shot pipeline:
 
-```bash
-pip install ultralytics mediapipe opencv-contrib-python numpy scipy anthropic
+```powershell
+python -m pip install --upgrade pip
+python -m pip install numpy opencv-contrib-python mediapipe ultralytics torch python-dotenv
 ```
 
-> **Note:** `torch` is installed automatically as an `ultralytics` dependency. GPU inference (CUDA/MPS) is auto-selected if available.
+For the `fc_juggle` FastAPI service, additionally install:
 
----
+```powershell
+python -m pip install fastapi "uvicorn[standard]" python-multipart scipy
+```
 
-## Configuration
+Alternatively, the submodule supplies `fc_juggle/environment.yml` for a Conda-based environment. Its package versions are intended for the juggle project and may be used instead of the pip setup above.
 
-Create a `.env` file in the project root (this file is git-ignored):
+## Optional Gemini coaching notes
+
+Create a root `.env` file to enable Gemini notes:
 
 ```env
-# .env — never commit this file
-
-# Option A: Google Gemini (recommended)
-GEMINI_API_KEY=your-gemini-api-key-here
-
-# Option B: Anthropic Claude
-# ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=your-key
 ```
 
-The pipeline checks `ANTHROPIC_API_KEY` first, then falls back to `GEMINI_API_KEY`. If neither is set, `coaching_note` will be `null` in the output — the analysis pipeline itself still runs normally.
+`GOOGLE_API_KEY` is also accepted. No API key is required for shot analysis: if no valid key is found, or every Gemini request fails, a local rule-based note is returned. The current shot pipeline does not call Anthropic/Claude; `test_anthropic.py` is a separate legacy API-key diagnostic script.
 
-### Getting API Keys
+## Run shot analysis
 
-| Provider | Where to get it |
-|---|---|
-| Google Gemini | [aistudio.google.com](https://aistudio.google.com) → Get API key |
-| Anthropic Claude | [console.anthropic.com](https://console.anthropic.com) → API Keys |
+Use the repository virtual-environment interpreter. `video_driver.py` validates its MediaPipe environment before importing the submodule's vision code.
 
----
+Analyze all `.mp4` files in `fc_juggle/source_data/`:
 
-## Running the Pipeline
-
-### Run all clips in `fc_juggle/source_data/`
-
-```bash
+```powershell
 .\venv\Scripts\python.exe video_driver.py
-# or on macOS/Linux:
-./venv/bin/python video_driver.py
 ```
 
-> Important: this project is currently tested against the repo virtual environment.
-> `fc_juggle/utils/vision_estimate.py` depends on MediaPipe with `mp.solutions.pose`.
-> If you run with a different Python interpreter, the script will exit with a clear error and ask you to use the `venv` Python.
->
-> The coaching note is generated only when the clip produces a valid shot result and a working Gemini API request.
-> If `coaching_note` does not appear, verify `.env` contains a valid `GEMINI_API_KEY` or `GOOGLE_API_KEY` and that network access to the Gemini endpoint is available.
->
-This will:
-1. Auto-discover all `.mp4` files in `fc_juggle/source_data/`
-2. Process each clip through the full pipeline
-3. Print each result as it completes
-4. Write all results to `results.json`
+Analyze one video:
 
-### Run a single clip
-
-```bash
-.\venv\Scripts\python.exe video_driver.py path/to/clip.mp4 clip_id
+```powershell
+.\venv\Scripts\python.exe video_driver.py path\to\clip.mp4 clip_id
 ```
 
-### Clear the cache before re-running
+The single-clip command prints the result to standard output. A batch run generates and prints each result, including its coaching note, as soon as that video is processed; it then overwrites `results.json`. By default, the batch stops after the first clip that returns an `error`.
 
-```bash
-# Windows PowerShell
-'[]' | Out-File results.json -Encoding utf8
-'{}' | Out-File calibrations.json -Encoding utf8
+To force new goal calibration on later runs, replace the contents of `calibrations.json` with `{}`. To clear saved batch output, replace `results.json` with `[]`.
+
+## Run the bundled juggle counter
+
+From the submodule directory, run the interactive CLI against a video or webcam:
+
+```powershell
+Set-Location fc_juggle
+..\venv\Scripts\python.exe main.py --video source_data\center.mp4
 ```
 
-This forces the pipeline to re-detect goal corners rather than using cached homographies.
+Useful CLI options:
 
-> Future improvement: make `fc_juggle/utils/vision_estimate.py` support both `mp.solutions` and `mediapipe.tasks` so the repository is not tied to a single MediaPipe API flavor.
-
----
-
-## Goal Zone Grid
-
-The goal is divided into a **3×3 grid** based on FIFA regulation dimensions (7.32m wide × 2.44m tall):
-
-```
-┌─────────────┬──────────────┬─────────────┐
-│  top-left   │  top-center  │  top-right  │
-│  (0–2.44m)  │ (2.44–4.88m) │ (4.88–7.32m)│
-├─────────────┼──────────────┼─────────────┤  2.44m
-│  mid-left   │  mid-center  │  mid-right  │
-│             │              │             │
-├─────────────┼──────────────┼─────────────┤  0.81m
-│ bottom-left │bottom-center │bottom-right │
-│             │              │             │
-└─────────────┴──────────────┴─────────────┘  0m
-     0m            3.66m           7.32m
+```text
+--save <directory>  Save an annotated MP4
+--plot              Show the ball Y-trajectory plot
+--json              Emit a headless JSON result (requires --video)
 ```
 
-Shots that miss are classified as `miss-over`, `miss-left`, or `miss-right`.
+To start the juggle-counting HTTP API locally:
 
----
-
-## Key Algorithms
-
-### Contact Frame Detection
-
-The exact frame where boot meets ball is found by fusing two signals:
-
-1. **Velocity spike** — ball displacement normalized by ball width (scale-invariant) exceeds **6.0 ball-widths/second**
-2. **Foot proximity gate** — a foot must be within **1.5 ball-widths** of the ball at that frame
-
-This eliminates false positives from bounces, camera shake, and tracking glitches.
-
-### Goal Calibration
-
-Goal corners are detected using **Canny edge detection + Hough line transform** on a CLAHE-enhanced, grass-masked frame. The four detected corners are mapped to metric world coordinates via `cv2.findHomography()`. Calibration runs at the **contact frame** (not frame 0) to handle moving cameras.
-
-### Ball Speed
-
-```
-speed_kmh = (displacement_px × 0.22m/ball_width_px / Δt) × 3.6
+```powershell
+Set-Location fc_juggle
+..\venv\Scripts\python.exe -m uvicorn api:app --host 0.0.0.0 --port 8080
 ```
 
-Speed is clamped to `(0, 150]` km/h — anything above 150 is treated as a tracking artifact.
+The API exposes `GET /health` and `POST /analyze`. The analysis endpoint accepts either a multipart `file`, a form `url`, and an optional `skip_frames` form field. Example:
 
-### Confidence Score
+```powershell
+curl.exe -X POST http://localhost:8080/analyze -F "file=@source_data/center.mp4"
+```
 
-| Signal | Weight |
-|---|---|
-| Goal calibration succeeded | 0.45 |
-| Shot angle available | 0.25 |
-| Foot label known | 0.15 |
-| FPS metadata reliable | 0.15 |
+`fc_juggle` also includes a Dockerfile and `modal_app.py` for container and Modal deployments. Those serve the juggle API, not the root shot-analysis pipeline.
 
-If no contact frame is found, confidence is `0.0` and no coaching note is generated.
+## Accuracy and limitations
 
----
+- The fine-tuned YOLO model detects one football class at a confidence threshold of 0.3.
+- MediaPipe pose tracks one primary pose, so foot attribution can be unreliable with multiple players, occlusion, or motion blur.
+- The Kalman filters are module-level state in `fc_juggle`; a batch may carry state between clips. Treat batch results as a prototype workflow and restart the process between controlled evaluations when isolation matters.
+- Goal calibration depends on visible posts and crossbar. Auto-calibration can fail with occlusion, unusual goal colors, weak contrast, extreme perspective, or a goal that is not visible near contact.
+- Pixel-fallback goal labels are approximate and do not establish whether a shot was on target.
+- Ball speed is inferred from the detected ball width using a 0.22 m ball diameter and is rejected above 150 km/h. It is an estimate, not radar data.
+- The shot-angle value is a knee-line proxy, not a full body-orientation measurement.
+- Results in the committed `results.json` are example output from the included clips, not ground-truth labels.
 
-## Known Limitations
+## License and data
 
-| Issue | Impact |
-|---|---|
-| **MediaPipe is single-person** | In clips with multiple players in frame, foot attribution may target the wrong person |
-| **Non-white goal posts** | The brightness threshold (190) fails on grey or coloured goals — falls back to manual click |
-| **Camera shake during shot** | Rapid pan between contact and goal crossing corrupts zone classification |
-| **Ball speed on very fast shots** | Motion blur causes overestimated displacement; clamped at 150 km/h |
-| **FPS fallback is 30fps** | Clips recorded at 24fps or 60fps will have timing errors if metadata is missing |
-| **Kalman state not reset in batch** | State carries across clips in a single batch run — correctness risk at scale |
-
----
-
-## Dependencies
-
-| Library | Role |
-|---|---|
-| `ultralytics` (YOLOv8) | Fine-tuned ball detection |
-| `mediapipe` | Human pose estimation (33 landmarks) |
-| `opencv-contrib-python` | Video I/O, edge detection, homography |
-| `numpy` | Array math, Kalman filter |
-| `scipy` | Peak detection for juggle counting |
-| `anthropic` | Claude API for coaching notes |
-| `torch` | YOLO inference backend (auto-selects CPU/MPS/CUDA) |
-
----
-
-*Built for FutbolConnect — automated shot analysis from raw mobile video.*
+No license file is present in this repository. Confirm usage rights before redistributing the code, the bundled model, or the sample videos.
