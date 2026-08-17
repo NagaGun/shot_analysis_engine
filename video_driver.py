@@ -109,6 +109,7 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
     # offset when that cap has trimmed early rows -- this used to silently
     # produce wrong frame numbers on longer clips; now it's handled.
 
+
     required_keys = ["Ball", "Right_Foot", "Left_Foot", "Right_Knee", "Left_Knee"]
     missing = [k for k in required_keys if k not in predictions or predictions[k].shape[0] == 0]
     if missing:
@@ -121,7 +122,10 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
         calib_path=calib_path,
     )
 
-    if generate_note and result.get("confidence", 0) > 0:
+    # Gate on "accepted", not confidence>0 — confidence can be nonzero on
+    # a rejected attempt. Only write a note for attempts that passed the
+    # hard accept/reject gate in analyze_shot.
+    if generate_note and result.get("accepted"):
         result["coaching_note"] = generate_coaching_note(result)
 
     return result

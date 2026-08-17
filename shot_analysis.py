@@ -18,6 +18,7 @@ from pathlib import Path
 import os
 import urllib.request
 import urllib.error
+import time
 
 try:
     from dotenv import load_dotenv
@@ -321,6 +322,12 @@ def detect_goal_corners_auto(frame: np.ndarray, return_score: bool = False, roi_
 
 def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_path: str = "calibrations.json",
                           window: int = 5, roi_fraction: float = 0.75, manual_fallback: bool = True):
+    """
+    manual_fallback=True blocks on cv2.waitKey(0) waiting for a human to
+    click 4 corners. Fine for building a local calibrations.json cache.
+    WILL HANG FOREVER on any headless/server path (Modal, CI, prod API).
+    Any off-laptop caller MUST pass manual_fallback=False explicitly.
+    """
     cache_key = f"{clip_id}_f{frame_number}"
     corners = load_calibration(cache_key, calib_path)
 
@@ -354,7 +361,6 @@ def calibrate_clip_auto(video_path: str, clip_id: str, frame_number: int, calib_
                     continue
 
         corners = best_corners
-
         # Automatic calibration is deliberately conservative. When it cannot
         # find a geometrically plausible goal, use four operator clicks rather
         # than silently projecting the shot through a bad homography.
@@ -506,16 +512,39 @@ def detect_contact_frame_fused(
     fps: float,
     velocity_threshold_ball_widths_per_sec: float = 3.0,
     proximity_threshold_ball_widths: float = 4.0,
+    min_contact_frames: int | None = None,
+    min_consecutive_spikes: int = 2,
+    strict: bool = True,
 ):
     """
-    Fuses ball velocity spike with pose-based foot proximity to find contact frame.
-    Supports a small frame window search for foot proximity and falls back to
-    raw velocity if foot detection was occluded/missing during kick.
+    strict=True (prod default): only returns a frame if a velocity spike
+    ALSO has a real foot match within proximity, AND has sustained motion
+    (consecutive-spike quality gate). No "unknown foot" or "strongest
+    spike anyway" fallback.
+    strict=False keeps the old relaxed behavior — local debugging only.
+
+    min_consecutive_spikes: the spike frame AND the following frame must
+    both be above threshold to count as sustained motion — this rejects
+    single-frame blips (tracking noise, YOLO false positive, motion blur)
+    without requiring a hard time-floor. Validated to be more reliable
+    than the earlier 0.15s cutoff since it adapts to the actual clip's
+    velocity pattern rather than an arbitrary temporal assumption.
+
+    min_contact_frames: if provided, also enforces the old time-floor as an
+    additional (not replacement) gate. Defaults to None (disabled) in prod.
+    Set explicitly for backward compat if needed.
     """
     if len(ball_track) < 2:
         return None, "unknown", None
 
     ball_by_frame = {b["frame"]: b for b in ball_track}
+    first_frame = ball_track[0]["frame"]
+
+    # Time-floor: optional secondary gate, disabled by default in prod.
+    if min_contact_frames is not None:
+        earliest_eligible_frame = first_frame + min_contact_frames
+    else:
+        earliest_eligible_frame = first_frame  # no time-floor
 
     candidates = []
     for i in range(1, len(ball_track)):
@@ -532,15 +561,40 @@ def detect_contact_frame_fused(
         normalized_velocity = px_per_sec / ball_width
         candidates.append((curr["frame"], normalized_velocity, (dx, dy), ball_width))
 
+    # Build an index for quick consecutive-frame lookup
+    candidate_by_frame = {c[0]: c for c in candidates}
+
     spikes = [c for c in candidates if c[1] >= velocity_threshold_ball_widths_per_sec]
     if not spikes:
+        if strict:
+            return None, "unknown", None
         raw_frame, raw_vec = detect_contact_frame(ball_track, fps, velocity_threshold_px_per_sec=1200.0)
         if raw_frame is not None:
             return raw_frame, "unknown", raw_vec
         return None, "unknown", None
 
-    # First pass: look for a fused velocity spike + foot proximity match
+    def _is_sustained(spike_frame: int, spike_ball_width: float) -> bool:
+        """Require at least min_consecutive_spikes-1 subsequent frames also
+        above half the threshold — filters single-frame blips without a
+        time-floor assumption."""
+        sustained = 1  # the spike itself counts
+        next_frame = spike_frame + 1
+        while sustained < min_consecutive_spikes:
+            nxt = candidate_by_frame.get(next_frame)
+            if nxt is None or nxt[1] < velocity_threshold_ball_widths_per_sec * 0.5:
+                return False
+            sustained += 1
+            next_frame += 1
+        return True
+
     for frame, norm_velocity, vec, ball_width in spikes:
+        if frame < earliest_eligible_frame:
+            continue
+
+        # Quality gate: reject single-frame blips
+        if not _is_sustained(frame, ball_width):
+            continue
+
         ball_pos = ball_by_frame.get(frame)
         if ball_pos is None:
             continue
@@ -559,7 +613,12 @@ def detect_contact_frame_fused(
 
         if best_dist is not None and best_dist <= proximity_threshold_ball_widths * ball_width:
             foot_name = "right" if "Right" in best_foot_label else "left" if "Left" in best_foot_label else "unknown"
+            if foot_name == "unknown":
+                continue
             return frame, foot_name, vec
+
+    if strict:
+        return None, "unknown", None
 
     spikes.sort(key=lambda s: -s[1])
     top_spike = spikes[0]
@@ -597,79 +656,156 @@ def _bucket_zone(world_x: float, world_y: float) -> str:
     return f"{v}-{h}"
 
 
+MIN_POST_CONTACT_POINTS = 3  # need at least this many tracked ball points after
+                              # contact before trusting a "where it crossed" read
+
+
 def _classify_zone_pixel_fallback(ball_track: list, contact_frame: int, frame_width: int, frame_height: int):
+    """DEBUG-ONLY. Buckets the ball's last on-screen position into screen
+    thirds. Not a real goal-plane reading — no homography behind it. Must
+    never be returned on the accepted/user-facing path."""
     post_contact = [p for p in ball_track if p["frame"] > contact_frame]
     if not post_contact:
         return {"goal_zone": None, "on_target": None, "calibration_ok": False}
-
     last = post_contact[-1]
     if frame_width <= 0 or frame_height <= 0:
         return {"goal_zone": None, "on_target": None, "calibration_ok": False}
-
     x_norm = max(0.0, min(1.0, last["x"] / frame_width))
     y_norm = max(0.0, min(1.0, last["y"] / frame_height))
-
-    if x_norm < 0.33:
-        h = "left"
-    elif x_norm < 0.66:
-        h = "center"
-    else:
-        h = "right"
-
-    if y_norm < 0.33:
-        v = "top"
-    elif y_norm < 0.66:
-        v = "mid"
-    else:
-        v = "bottom"
-
+    h = "left" if x_norm < 0.33 else "center" if x_norm < 0.66 else "right"
+    v = "top" if y_norm < 0.33 else "mid" if y_norm < 0.66 else "bottom"
     return {"goal_zone": f"{v}-{h}", "on_target": None, "calibration_ok": False}
+
+
+def _fit_trajectory_zone(post_contact: list, H: np.ndarray) -> dict | None:
+    """
+    Fit a 2D parabola through all post-contact ball positions projected into
+    world space, then evaluate where the fitted trajectory crosses the goal
+    plane (goal y-axis = 0 in world space, i.e., ball is at ground level heading
+    toward the goal at wy~0).
+
+    Because goal-plane depth isn't directly observable from a single camera,
+    we use the world-space y-coordinate (meters off ground) paired with the
+    time index (frame number) as the independent variable. The fitted curve
+    gives a better estimate of where the ball *was heading* at crossing than
+    the last tracked pixel, which may still be 2-3 m in front of the net.
+
+    Returns a zone string ("top-left", "mid-center", etc.) or None if the
+    fit fails or the trajectory exits the goal rectangle.
+    """
+    frames, wxs, wys = [], [], []
+    for p in post_contact:
+        try:
+            wx, wy = pixel_to_world(H, (p["x"], p["y"]))
+        except Exception:
+            continue
+        frames.append(p["frame"])
+        wxs.append(wx)
+        wys.append(wy)
+
+    if len(frames) < 3:
+        return None  # caller falls back to last-point
+
+    # Normalise frame indices to [0, 1] for numerical stability with polyfit
+    f_min, f_max = frames[0], frames[-1]
+    if f_max == f_min:
+        return None
+    t = [(f - f_min) / (f_max - f_min) for f in frames]
+
+    try:
+        # Fit separate 2nd-degree polynomials for x and y over normalised time
+        cx = np.polyfit(t, wxs, 2)  # [a, b, c] for ax^2 + bx + c
+        cy = np.polyfit(t, wys, 2)
+
+        # Extrapolate slightly beyond t=1 to find where ball crosses goal plane
+        # (wy ≈ 0 represents a ball near ground level at goal face; for a rising
+        # shot we want where wy is within goal height, so sample t values
+        # slightly beyond clip end and pick the best crossing within bounds).
+        eval_ts = [t[-1] + 0.1 * i for i in range(1, 6)]
+        best_wx, best_wy = None, None
+        for et in eval_ts:
+            ewx = float(np.polyval(cx, et))
+            ewy = float(np.polyval(cy, et))
+            if 0 <= ewx <= GOAL_WIDTH_M and 0 <= ewy <= GOAL_HEIGHT_M:
+                best_wx, best_wy = ewx, ewy
+                break
+
+        if best_wx is None:
+            # Trajectory doesn't hit the goal frame in the extrapolation window;
+            # use the final evaluated point clamped to the goal face
+            et = eval_ts[-1]
+            best_wx = float(np.polyval(cx, et))
+            best_wy = float(np.polyval(cy, et))
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+
+    # Out-of-bounds check using fitted endpoint
+    if best_wy > GOAL_HEIGHT_M:
+        return {"goal_zone": "miss-over", "on_target": False, "calibration_ok": True, "reject_reason": None}
+    if best_wx < 0:
+        return {"goal_zone": "miss-left", "on_target": False, "calibration_ok": True, "reject_reason": None}
+    if best_wx > GOAL_WIDTH_M:
+        return {"goal_zone": "miss-right", "on_target": False, "calibration_ok": True, "reject_reason": None}
+    if 0 <= best_wy <= GOAL_HEIGHT_M:
+        zone = _bucket_zone(max(0, min(best_wx, GOAL_WIDTH_M - 0.01)), best_wy)
+        return {"goal_zone": zone, "on_target": True, "calibration_ok": True, "reject_reason": None,
+                "_zone_method": "trajectory_fit"}
+
+    return None
 
 
 def classify_zone(ball_track: list, contact_frame: int, H: np.ndarray | None, frame_width: int = None, frame_height: int = None):
     """
-    ball_track: full per-frame ball positions (same shape as detect_contact_frame input)
-    contact_frame: output of detect_contact_frame
-    H: homography from calibration.calibrate_clip, or None if calibration failed
+    Returns {"goal_zone": str|None, "on_target": bool|None,
+             "calibration_ok": bool, "reject_reason": str|None}
 
-    Returns dict: {"goal_zone": str, "on_target": bool, "calibration_ok": bool}
+    Zone estimation uses a parabola fit through all post-contact tracked
+    ball positions projected into world space (see _fit_trajectory_zone).
+    Falls back to the last tracked point if there are too few points to fit.
+
+    v1 policy: can't calibrate, or not enough post-contact tracking to
+    trust the read -> reject (goal_zone=None). No pixel-thirds fallback.
     """
     if frame_width is None or frame_height is None:
         frame_width = frame_width or 0
         frame_height = frame_height or 0
 
     if H is None:
-        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
+        return {"goal_zone": None, "on_target": None, "calibration_ok": False,
+                "reject_reason": "calibration_failed"}
 
     post_contact = [p for p in ball_track if p["frame"] > contact_frame]
-    if not post_contact:
-        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
+    if len(post_contact) < MIN_POST_CONTACT_POINTS:
+        return {"goal_zone": None, "on_target": None, "calibration_ok": True,
+                "reject_reason": "insufficient_post_contact_tracking"}
 
-    last_world = None
-    for p in post_contact:
-        wx, wy = pixel_to_world(H, (p["x"], p["y"]))
-        last_world = (wx, wy)
-        within_width = -0.5 <= wx <= GOAL_WIDTH_M + 0.5
-        within_height = 0 <= wy <= GOAL_HEIGHT_M + 1.0
-        if within_width and 0 <= wy <= GOAL_HEIGHT_M:
-            zone = _bucket_zone(max(0, min(wx, GOAL_WIDTH_M - 0.01)), wy)
-            return {"goal_zone": zone, "on_target": True, "calibration_ok": True}
+    # Primary: fit a parabolic trajectory through all post-contact points
+    # and extrapolate to where the ball crosses the goal plane.
+    fit_result = _fit_trajectory_zone(post_contact, H)
+    if fit_result is not None:
+        return fit_result
 
-    if last_world is None:
-        return _classify_zone_pixel_fallback(ball_track, contact_frame, frame_width, frame_height)
+    # Fallback: not enough points for a stable fit — use last tracked point.
+    # Documented in v2_backlog as placeholder; this path fires when MIN_POST_CONTACT_POINTS
+    # is met but the fit still fails (collinear points, degenerate polyfit).
+    last_point = post_contact[-1]
+    wx, wy = pixel_to_world(H, (last_point["x"], last_point["y"]))
 
-    wx, wy = last_world
     if wy > GOAL_HEIGHT_M:
         miss = "miss-over"
     elif wx < 0:
         miss = "miss-left"
     elif wx > GOAL_WIDTH_M:
         miss = "miss-right"
+    elif 0 <= wy <= GOAL_HEIGHT_M:
+        zone = _bucket_zone(max(0, min(wx, GOAL_WIDTH_M - 0.01)), wy)
+        return {"goal_zone": zone, "on_target": True, "calibration_ok": True,
+                "reject_reason": None, "_zone_method": "last_point_fallback"}
     else:
-        zone = _bucket_zone(max(0, min(wx, GOAL_WIDTH_M - 0.01)), max(0, min(wy, GOAL_HEIGHT_M - 0.01)))
-        return {"goal_zone": zone, "on_target": False, "calibration_ok": True}
+        return {"goal_zone": None, "on_target": None, "calibration_ok": True,
+                "reject_reason": "unreadable_trajectory"}
 
-    return {"goal_zone": miss, "on_target": False, "calibration_ok": True}
+    return {"goal_zone": miss, "on_target": False, "calibration_ok": True, "reject_reason": None}
 
 
 # ======================================================================
@@ -793,8 +929,13 @@ def compute_confidence(
     angle_available: bool,
 ) -> float:
     """
+    A soft 0-1 QUALITY score, not an accept/reject signal — it's possible
+    to score high here with a wrong contact frame. Do not show this to
+    users as an accuracy percentage, and do not gate anything on it alone
+    — use determine_acceptance() for that instead.
+
     If contact wasn't found at all, nothing downstream is trustworthy --
-    return 0.0 immediately rather than let partial credit imply otherwise.
+    return 0.0 immediately.
     """
     if not contact_found:
         return 0.0
@@ -817,6 +958,32 @@ def compute_confidence(
 # ======================================================================
 # from shot_pipeline.py
 # ======================================================================
+
+def determine_acceptance(
+    contact_found: bool,
+    foot_known: bool,
+    calibration_ok: bool,
+    zone_reject_reason: str | None,
+) -> tuple[bool, list[str]]:
+    """
+    Hard gate: is this attempt valid enough to show a result / generate a
+    coaching note, or reject and ask the player to try again? Separate
+    from compute_confidence() on purpose — confidence is a soft quality
+    score that can be high on a wrong read; this is the actual yes/no.
+
+    Returns (accepted, reject_reasons). reject_reasons is an empty list iff accepted.
+    """
+    reasons = []
+    if not contact_found:
+        reasons.append("no_contact_detected")
+    if not foot_known:
+        reasons.append("foot_not_identified")
+    if not calibration_ok:
+        reasons.append("calibration_failed")
+    if zone_reject_reason is not None:
+        reasons.append(zone_reject_reason)
+    return len(reasons) == 0, reasons
+
 
 def analyze_shot(
     video_path: str,
@@ -868,6 +1035,9 @@ def analyze_shot(
             "shot_angle_deg": None,
             "ball_speed_kmh": None,
             "confidence": 0.0,
+            "accepted": False,
+            "reject_reasons": ["no_contact_detected"],
+            "reject_reason": "no_contact_detected",
             "coaching_note": None,
         }
 
@@ -875,7 +1045,9 @@ def analyze_shot(
         # Calibrate at contact_frame, not frame 0 -- this is what fixes the
         # "video moves the goal" problem. Auto-detected, no clicking needed;
         # falls back to a click only if auto-detection fails on this frame.
-        H, goal_corners = calibrate_clip_auto(video_path, clip_id, contact_frame, calib_path)
+        H, goal_corners = calibrate_clip_auto(
+            video_path, clip_id, contact_frame, calib_path, manual_fallback=False
+        )
         calibration_ok = True
     except ValueError:
         H, goal_corners = None, None
@@ -899,17 +1071,25 @@ def analyze_shot(
         angle_available=angle_available,
     )
 
+    accepted, reject_reasons = determine_acceptance(
+        contact_found=contact_found,
+        foot_known=foot_known,
+        calibration_ok=calibration_ok,
+        zone_reject_reason=zone_result.get("reject_reason"),
+    )
+
     return {
         "clip_id": clip_id,
         "frame_of_contact": contact_frame,
         "foot": foot,
-        "goal_zone": zone_result["goal_zone"],
+        "goal_zone": zone_result["goal_zone"] if accepted else None,
         "shot_angle_deg": angle_deg,
         "ball_speed_kmh": ball_speed_kmh,
         "confidence": confidence,
-        "coaching_note": None,    # filled in separately by coaching_note.py -- kept out
-                                   # of this function so testing the geometry doesn't
-                                   # require an API key or network call every run
+        "accepted": accepted,
+        "reject_reasons": reject_reasons,
+        "reject_reason": reject_reasons[0] if reject_reasons else None,
+        "coaching_note": None,
     }
 
 
@@ -922,73 +1102,31 @@ SYSTEM_PROMPT = """You are a football scout writing a concise 2-3 sentence coach
 Translate the evidence into natural scouting language rather than repeating JSON fields. At youth and semi-professional level, placement matters more than raw power. Foot used is a useful scouting signal, but never label it a weak or dominant foot unless that fact is provided. A wide angle can suggest comfort finishing from wide areas, while a central angle can suggest a central-striker profile; treat the angle as approximate. Mention limited tracking confidence when relevant and never invent match context, pressure, or technique not present in the data.
 """
 
-
-_gemini_models_cache: list[str] | None = None
-
-
-def _available_gemini_models(gemini_key: str) -> list[str]:
-    """Validate the key and discover models this Gemini project can use."""
-    global _gemini_models_cache
-    if _gemini_models_cache is not None:
-        return _gemini_models_cache
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
-    try:
-        with urllib.request.urlopen(url, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as he:
-        print(f"Gemini API key validation failed: HTTP {he.code}. Check the key's Google AI Studio project and API access.")
-        _gemini_models_cache = []
-        return _gemini_models_cache
-    except Exception as exc:
-        print(f"Gemini model discovery failed: {exc}")
-        _gemini_models_cache = []
-        return _gemini_models_cache
-
-    models = []
-    for model in data.get("models", []):
-        if "generateContent" not in model.get("supportedGenerationMethods", []):
-            continue
-        name = model.get("name", "")
-        if name.startswith("models/"):
-            name = name.removeprefix("models/")
-        if name:
-            models.append(name)
-
-    _gemini_models_cache = models
-    return models
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
+GEMINI_REQUEST_TIMEOUT_SEC = 10
+GEMINI_RETRY_ATTEMPTS = 3
+GEMINI_RETRY_BASE_DELAY_SEC = 1.0
 
 
 def generate_coaching_note(shot_data: dict, attempt_history: list[dict] | None = None):
     """Generate a coaching note from one video's structured shot data."""
-    env_path = Path(__file__).parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+    # Prioritize existing environment variables (e.g., from Modal secrets or OS environment).
+    # Only load from local .env if GEMINI_API_KEY / GOOGLE_API_KEY is not already present.
+    if "GEMINI_API_KEY" not in os.environ and "GOOGLE_API_KEY" not in os.environ:
+        env_path = Path(__file__).parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
 
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not gemini_key or gemini_key.startswith("your-"):
-        print("coaching_note generation skipped: No valid GEMINI_API_KEY or GOOGLE_API_KEY configured in .env. Using local fallback note.")
+        print("coaching_note generation skipped: No valid GEMINI_API_KEY/GOOGLE_API_KEY. Using local fallback note.")
         return _generate_fallback_note(shot_data, attempt_history)
 
-    available_models = _available_gemini_models(gemini_key)
-    if not available_models:
-        print("Gemini returned no usable generation models; using the local fallback note.")
-        return _generate_fallback_note(shot_data, attempt_history)
-
-    # Respect an explicit .env preference when it is available, then prefer
-    # current Flash models, and finally use any model the key exposes.
-    requested_model = os.environ.get("GEMINI_MODEL")
-    # The 2.5 identifiers may still appear in model discovery but are retired
-    # for new users. Prefer the provider-maintained current aliases instead.
-    preferred_models = [requested_model, "gemini-flash-latest", "gemini-flash-lite-latest"]
-    models_to_try = []
-    for model_name in preferred_models + available_models:
-        if model_name and model_name in available_models and model_name not in models_to_try:
-            models_to_try.append(model_name)
+    model_name = os.environ.get("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
 
     prompt_text = f"Shot data:\n{json.dumps(shot_data, indent=2)}\n\nWrite the coaching note."
     payload = {
@@ -997,58 +1135,69 @@ def generate_coaching_note(shot_data: dict, attempt_history: list[dict] | None =
         "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.7}
     }
 
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": gemini_key,
+        },
+    )
+
+    data = None
+    for attempt in range(1, GEMINI_RETRY_ATTEMPTS + 1):
         try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=GEMINI_REQUEST_TIMEOUT_SEC) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                text_parts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)]
-                text = "".join(text_parts).strip()
-                if text:
-                    return text
-            if isinstance(data.get("output"), dict):
-                text = data["output"].get("text")
-                if text:
-                    return text.strip()
-
-            print(f"Gemini coaching_note returned no text ({model_name}); using the local fallback.")
-            return _generate_fallback_note(shot_data, attempt_history)
+            break
         except urllib.error.HTTPError as he:
-            if he.code == 404:
-                print(f"Gemini model unavailable ({model_name}); trying the next discovered model.")
-                continue
-            try:
-                error_body = he.read().decode("utf-8")
-                error_data = json.loads(error_body).get("error", {})
-                message = error_data.get("message", "Gemini request failed")
-            except Exception:
-                message = str(he)
-
-            if he.code == 429:
-                print(f"Gemini quota reached ({model_name}); using the local fallback.")
-            else:
-                print(f"Gemini coaching_note failed ({model_name}): HTTP {he.code}; using the local fallback.")
-            return _generate_fallback_note(shot_data, attempt_history)
+            if he.code < 500 or attempt == GEMINI_RETRY_ATTEMPTS:
+                try:
+                    error_body = he.read().decode("utf-8")
+                    error_data = json.loads(error_body).get("error", {})
+                    message = error_data.get("message", "Gemini request failed")
+                except Exception:
+                    message = str(he)
+                if he.code == 429:
+                    print(f"Gemini quota reached ({model_name}); using local fallback.")
+                elif he.code == 404:
+                    print(f"Gemini model '{model_name}' unavailable ({message}); check GEMINI_MODEL. Using local fallback.")
+                else:
+                    print(f"Gemini coaching_note failed ({model_name}): HTTP {he.code} {message}; using local fallback.")
+                return _generate_fallback_note(shot_data, attempt_history)
+            print(f"Gemini HTTP {he.code} on attempt {attempt}/{GEMINI_RETRY_ATTEMPTS}. Retrying...")
+            time.sleep(GEMINI_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)))
+        except (TimeoutError, OSError) as te:
+            if attempt == GEMINI_RETRY_ATTEMPTS:
+                print(f"Gemini coaching_note timed out/failed after {GEMINI_RETRY_ATTEMPTS} attempts ({model_name}); using local fallback.")
+                return _generate_fallback_note(shot_data, attempt_history)
+            print(f"Gemini request timed out/failed on attempt {attempt}/{GEMINI_RETRY_ATTEMPTS}. Retrying...")
+            time.sleep(GEMINI_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)))
         except Exception as e:
-            print(f"Gemini coaching_note failed ({model_name}): {e}; using the local fallback.")
+            print(f"Gemini coaching_note failed ({model_name}): {e}; using local fallback.")
             return _generate_fallback_note(shot_data, attempt_history)
 
-    print("Gemini discovered models but none returned a coaching note; using the local fallback note.")
+    if data:
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text_parts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)]
+            text = "".join(text_parts).strip()
+            if text:
+                return text
+        if isinstance(data.get("output"), dict):
+            text = data["output"].get("text")
+            if text:
+                return text.strip()
+
+    print(f"Gemini coaching_note returned no text ({model_name}); using local fallback.")
     return _generate_fallback_note(shot_data, attempt_history)
 
 
 def _generate_fallback_note(shot_data: dict, attempt_history: list[dict] | None = None) -> str:
     """Local narrative fallback when Gemini is unavailable."""
     foot = shot_data.get("foot", "unknown")
-    goal_zone = shot_data.get("goal_zone")
     speed = shot_data.get("ball_speed_kmh")
     confidence = shot_data.get("confidence", 0.0)
 
