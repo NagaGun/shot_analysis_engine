@@ -690,8 +690,8 @@ def _fit_trajectory_zone(post_contact: list, H: np.ndarray) -> dict | None:
     gives a better estimate of where the ball *was heading* at crossing than
     the last tracked pixel, which may still be 2-3 m in front of the net.
 
-    Returns a zone string ("top-left", "mid-center", etc.) or None if the
-    fit fails or the trajectory exits the goal rectangle.
+    Returns a zone string ("top-left", "mid-center", etc.) or miss classification
+    if the trajectory exits the goal rectangle.
     """
     frames, wxs, wys = [], [], []
     for p in post_contact:
@@ -706,6 +706,8 @@ def _fit_trajectory_zone(post_contact: list, H: np.ndarray) -> dict | None:
     if len(frames) < 3:
         return None  # caller falls back to last-point
 
+    last_wx, last_wy = wxs[-1], wys[-1]
+
     # Normalise frame indices to [0, 1] for numerical stability with polyfit
     f_min, f_max = frames[0], frames[-1]
     if f_max == f_min:
@@ -714,30 +716,35 @@ def _fit_trajectory_zone(post_contact: list, H: np.ndarray) -> dict | None:
 
     try:
         # Fit separate 2nd-degree polynomials for x and y over normalised time
-        cx = np.polyfit(t, wxs, 2)  # [a, b, c] for ax^2 + bx + c
-        cy = np.polyfit(t, wys, 2)
+        cx = np.polyfit(t, wxs, 2 if len(t) >= 3 else 1)
+        cy = np.polyfit(t, wys, 2 if len(t) >= 3 else 1)
 
-        # Extrapolate slightly beyond t=1 to find where ball crosses goal plane
-        # (wy ≈ 0 represents a ball near ground level at goal face; for a rising
-        # shot we want where wy is within goal height, so sample t values
-        # slightly beyond clip end and pick the best crossing within bounds).
-        eval_ts = [t[-1] + 0.1 * i for i in range(1, 6)]
+        # Sample trajectory densely from t=0.0 (contact) to t=1.2 (including post-contact)
+        eval_ts = np.linspace(0.0, 1.2, 25)
         best_wx, best_wy = None, None
         for et in eval_ts:
             ewx = float(np.polyval(cx, et))
             ewy = float(np.polyval(cy, et))
             if 0 <= ewx <= GOAL_WIDTH_M and 0 <= ewy <= GOAL_HEIGHT_M:
                 best_wx, best_wy = ewx, ewy
-                break
 
         if best_wx is None:
-            # Trajectory doesn't hit the goal frame in the extrapolation window;
-            # use the final evaluated point clamped to the goal face
-            et = eval_ts[-1]
-            best_wx = float(np.polyval(cx, et))
-            best_wy = float(np.polyval(cy, et))
+            if 0 <= last_wx <= GOAL_WIDTH_M and 0 <= last_wy <= GOAL_HEIGHT_M:
+                best_wx, best_wy = last_wx, last_wy
+            else:
+                best_wx = float(np.polyval(cx, 1.0))
+                best_wy = float(np.polyval(cy, 1.0))
     except (np.linalg.LinAlgError, ValueError):
-        return None
+        if 0 <= last_wx <= GOAL_WIDTH_M and 0 <= last_wy <= GOAL_HEIGHT_M:
+            best_wx, best_wy = last_wx, last_wy
+        else:
+            return None
+
+    # On-target check
+    if 0 <= best_wy <= GOAL_HEIGHT_M and 0 <= best_wx <= GOAL_WIDTH_M:
+        zone = _bucket_zone(max(0.0, min(best_wx, GOAL_WIDTH_M - 0.01)), max(0.0, min(best_wy, GOAL_HEIGHT_M - 0.01)))
+        return {"goal_zone": zone, "on_target": True, "calibration_ok": True, "reject_reason": None,
+                "_zone_method": "trajectory_fit"}
 
     # Out-of-bounds check using fitted endpoint
     if best_wy > GOAL_HEIGHT_M:
@@ -746,10 +753,6 @@ def _fit_trajectory_zone(post_contact: list, H: np.ndarray) -> dict | None:
         return {"goal_zone": "miss-left", "on_target": False, "calibration_ok": True, "reject_reason": None}
     if best_wx > GOAL_WIDTH_M:
         return {"goal_zone": "miss-right", "on_target": False, "calibration_ok": True, "reject_reason": None}
-    if 0 <= best_wy <= GOAL_HEIGHT_M:
-        zone = _bucket_zone(max(0, min(best_wx, GOAL_WIDTH_M - 0.01)), best_wy)
-        return {"goal_zone": zone, "on_target": True, "calibration_ok": True, "reject_reason": None,
-                "_zone_method": "trajectory_fit"}
 
     return None
 
@@ -1102,8 +1105,8 @@ SYSTEM_PROMPT = """You are a football scout writing a concise 2-3 sentence coach
 Translate the evidence into natural scouting language rather than repeating JSON fields. At youth and semi-professional level, placement matters more than raw power. Foot used is a useful scouting signal, but never label it a weak or dominant foot unless that fact is provided. A wide angle can suggest comfort finishing from wide areas, while a central angle can suggest a central-striker profile; treat the angle as approximate. Mention limited tracking confidence when relevant and never invent match context, pressure, or technique not present in the data.
 """
 
-GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
-GEMINI_REQUEST_TIMEOUT_SEC = 10
+GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
+GEMINI_REQUEST_TIMEOUT_SEC = 15
 GEMINI_RETRY_ATTEMPTS = 3
 GEMINI_RETRY_BASE_DELAY_SEC = 1.0
 
@@ -1200,6 +1203,7 @@ def _generate_fallback_note(shot_data: dict, attempt_history: list[dict] | None 
     foot = shot_data.get("foot", "unknown")
     speed = shot_data.get("ball_speed_kmh")
     confidence = shot_data.get("confidence", 0.0)
+    goal_zone = shot_data.get("goal_zone")
 
     usable_attempts = [
         attempt for attempt in (attempt_history or [shot_data])

@@ -125,15 +125,39 @@ futbolconnect-shot-analysis/
 
 ### Run Local Shot Analysis
 
-Run batch analysis on test clips:
+Run batch analysis on test clips using the helper scripts:
 ```powershell
+# PowerShell
+.\run.ps1
+
+# CMD
+run.bat
+
+# Direct Python
 .\venv\Scripts\python.exe video_driver.py
 ```
 
 Run single clip analysis:
 ```powershell
-.\venv\Scripts\python.exe video_driver.py path\to\video.mp4 clip_01
+# PowerShell
+.\run.ps1 path\to\video.mp4 clip_01
+
+# CMD
+run.bat path\to\video.mp4 clip_01
 ```
+
+Run unit tests:
+```powershell
+.\run.ps1 test
+```
+
+---
+
+## Recent Fixes & Pipeline Enhancements
+
+- **Kalman State Isolation**: Reset module-level Kalman filter state per clip in `video_driver.py` to eliminate cross-clip velocity drift in batch mode.
+- **Goal Zone Classification**: Refined trajectory zone evaluation in `shot_analysis.py` across full flight path ($t=0.0 \dots 1.2$), accurately recognizing on-target goal entries without over-extrapolation miss errors.
+- **Gemini Fallback & Timeout Resilience**: Updated default Gemini model to `gemini-1.5-flash` with 15s timeout and resolved variable evaluation bugs in offline narrative fallback notes.
 
 ---
 

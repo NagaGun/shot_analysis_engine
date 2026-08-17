@@ -66,7 +66,7 @@ _original_cwd = os.getcwd()
 os.chdir(FC_JUGGLE_DIR)
 try:
     from utils.vision_estimate import get_POI
-    from utils.update_predict import update_measurements, predict_KF
+    from utils.update_predict import update_measurements, predict_KF, kalman_filter
 finally:
     os.chdir(_original_cwd)
 
@@ -74,6 +74,9 @@ from shot_analysis import analyze_shot, generate_coaching_note
 
 
 def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.json", generate_note: bool = True):
+    # Reset global Kalman filter state so previous video clips don't leak state into this clip
+    kalman_filter.clear()
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return {"clip_id": clip_id, "error": f"could not open {video_path}"}
@@ -108,7 +111,6 @@ def run_on_video(video_path: str, clip_id: str, calib_path: str = "calibrations.
     # is passed to analyze_shot below specifically so it can compute the right
     # offset when that cap has trimmed early rows -- this used to silently
     # produce wrong frame numbers on longer clips; now it's handled.
-
 
     required_keys = ["Ball", "Right_Foot", "Left_Foot", "Right_Knee", "Left_Knee"]
     missing = [k for k in required_keys if k not in predictions or predictions[k].shape[0] == 0]

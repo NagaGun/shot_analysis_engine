@@ -3,100 +3,140 @@
     "clip_id": "bottom_r_2",
     "frame_of_contact": 31,
     "foot": "left",
-    "goal_zone": "bottom-left",
+    "goal_zone": "bottom-center",
     "shot_angle_deg": 152.0219867896443,
     "ball_speed_kmh": 4.9,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom left area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
+    "accepted": true,
+    "reject_reasons": [],
+    "reject_reason": null,
+    "coaching_note": "The finish looks directed toward the bottom center area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
   },
   {
     "clip_id": "center",
     "frame_of_contact": 31,
     "foot": "left",
-    "goal_zone": "bottom-center",
-    "shot_angle_deg": -172.84223994880125,
+    "goal_zone": "top-right",
+    "shot_angle_deg": -172.8839165003124,
     "ball_speed_kmh": 3.0,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom center area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
+    "accepted": true,
+    "reject_reasons": [],
+    "reject_reason": null,
+    "coaching_note": "The finish looks directed toward the top right area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
   },
   {
     "clip_id": "center_off_post",
     "frame_of_contact": 130,
     "foot": "left",
-    "goal_zone": "bottom-right",
+    "goal_zone": null,
     "shot_angle_deg": 12.186586367198373,
     "ball_speed_kmh": 7.2,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom right area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
+    "accepted": false,
+    "reject_reasons": [
+      "unreadable_trajectory"
+    ],
+    "reject_reason": "unreadable_trajectory",
+    "coaching_note": null
   },
   {
     "clip_id": "left_corner",
-    "frame_of_contact": 124,
+    "frame_of_contact": null,
     "foot": "unknown",
-    "goal_zone": "miss-over",
-    "shot_angle_deg": 28.052405688361773,
+    "goal_zone": null,
+    "shot_angle_deg": null,
     "ball_speed_kmh": null,
-    "confidence": 0.85,
-    "coaching_note": "The attempt appears to miss over. The sample is too limited to establish a consistent finishing tendency."
+    "confidence": 0.0,
+    "accepted": false,
+    "reject_reasons": [
+      "no_contact_detected"
+    ],
+    "reject_reason": "no_contact_detected",
+    "coaching_note": null
   },
   {
     "clip_id": "left_corner_3",
-    "frame_of_contact": 3,
-    "foot": "right",
-    "goal_zone": "bottom-center",
-    "shot_angle_deg": -23.983527266357015,
-    "ball_speed_kmh": 26.1,
+    "frame_of_contact": 4,
+    "foot": "left",
+    "goal_zone": null,
+    "shot_angle_deg": -45.45777587063813,
+    "ball_speed_kmh": 5.6,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom center area. This attempt was likely taken with the right foot. The shot looks composed with moderate pace."
+    "accepted": false,
+    "reject_reasons": [
+      "unreadable_trajectory"
+    ],
+    "reject_reason": "unreadable_trajectory",
+    "coaching_note": null
   },
   {
     "clip_id": "left_middle",
-    "frame_of_contact": 88,
+    "frame_of_contact": null,
     "foot": "unknown",
-    "goal_zone": "miss-left",
-    "shot_angle_deg": -4.695056470498741,
-    "ball_speed_kmh": 33.4,
-    "confidence": 0.85,
-    "coaching_note": "The attempt appears to miss left. The strike has good power for the level of footage. The sample is too limited to establish a consistent finishing tendency."
+    "goal_zone": null,
+    "shot_angle_deg": null,
+    "ball_speed_kmh": null,
+    "confidence": 0.0,
+    "accepted": false,
+    "reject_reasons": [
+      "no_contact_detected"
+    ],
+    "reject_reason": "no_contact_detected",
+    "coaching_note": null
   },
   {
     "clip_id": "middle_2",
     "frame_of_contact": 1,
-    "foot": "right",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": -170.2629447504095,
-    "ball_speed_kmh": 36.5,
+    "foot": "left",
+    "goal_zone": "mid-right",
+    "shot_angle_deg": -164.95830492921294,
+    "ball_speed_kmh": 3.4,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom left area. This attempt was likely taken with the right foot. The strike has good power for the level of footage."
+    "accepted": true,
+    "reject_reasons": [],
+    "reject_reason": null,
+    "coaching_note": "The finish looks directed toward the mid right area. This attempt was likely taken with the left foot. This looks like a more controlled finish rather than a full-power strike."
   },
   {
     "clip_id": "middle_3",
-    "frame_of_contact": 50,
+    "frame_of_contact": null,
     "foot": "unknown",
-    "goal_zone": "miss-over",
-    "shot_angle_deg": 14.694944362239681,
+    "goal_zone": null,
+    "shot_angle_deg": null,
     "ball_speed_kmh": null,
-    "confidence": 0.85,
-    "coaching_note": "The attempt appears to miss over. The sample is too limited to establish a consistent finishing tendency."
+    "confidence": 0.0,
+    "accepted": false,
+    "reject_reasons": [
+      "no_contact_detected"
+    ],
+    "reject_reason": "no_contact_detected",
+    "coaching_note": null
   },
   {
     "clip_id": "miss",
     "frame_of_contact": 96,
     "foot": "right",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": 174.71150682122845,
+    "goal_zone": "mid-left",
+    "shot_angle_deg": 174.71150682122834,
     "ball_speed_kmh": 4.5,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom left area. This attempt was likely taken with the right foot. This looks like a more controlled finish rather than a full-power strike."
+    "accepted": true,
+    "reject_reasons": [],
+    "reject_reason": null,
+    "coaching_note": "The finish looks directed toward the mid left area. This attempt was likely taken with the right foot. This looks like a more controlled finish rather than a full-power strike."
   },
   {
     "clip_id": "right_top",
     "frame_of_contact": 24,
     "foot": "right",
-    "goal_zone": "bottom-left",
-    "shot_angle_deg": -24.256456723590958,
+    "goal_zone": "bottom-center",
+    "shot_angle_deg": -24.251022872531422,
     "ball_speed_kmh": 3.7,
     "confidence": 1.0,
-    "coaching_note": "The finish looks directed toward the bottom left area. This attempt was likely taken with the right foot. This looks like a more controlled finish rather than a full-power strike."
+    "accepted": true,
+    "reject_reasons": [],
+    "reject_reason": null,
+    "coaching_note": "The finish looks directed toward the bottom center area. This attempt was likely taken with the right foot. This looks like a more controlled finish rather than a full-power strike."
   }
 ]
